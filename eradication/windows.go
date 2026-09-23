@@ -376,11 +376,17 @@ func (m *Manager) quarantine(caseID string, hit HitEvent, a Artifact) (string, e
 	if err != nil || currentHash != a.SHA256 {
 		return "", fmt.Errorf("source hash changed before removal: %v", err)
 	}
-	if err := os.Remove(a.Path); err != nil {
+	precondition := fmt.Sprintf("file_id=%s sha256=%s quarantine=%s", a.FileID, a.SHA256, target)
+	if err := runJournaled(m.root, caseID, ArtifactID(a.Path, a.FileID, a.SHA256), "", "delete_original", a.Path, precondition, func() error {
+		if err := os.Remove(a.Path); err != nil {
+			return err
+		}
+		if _, err := os.Lstat(a.Path); !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("source still present after removal: %v", err)
+		}
+		return nil
+	}); err != nil {
 		return "", err
-	}
-	if _, err := os.Lstat(a.Path); !errors.Is(err, os.ErrNotExist) {
-		return "", fmt.Errorf("source still present after removal: %v", err)
 	}
 	return target, nil
 }

@@ -280,7 +280,9 @@ func (m *Manager) handle(hit HitEvent) {
 		}
 		a.QuarantinePath = path
 		a.Status = "quarantined"
-		if err := m.recordQuarantine(c.ID, a); err != nil {
+		if err := runJournaled(m.root, c.ID, ArtifactID(a.Path, a.FileID, a.SHA256), "", "record_ownership", a.Path, "quarantine verified at "+path, func() error {
+			return m.recordQuarantine(c.ID, a)
+		}); err != nil {
 			a.Status = "pending"
 			a.Error = "ownership record failed after quarantine: " + err.Error()
 		}
@@ -294,7 +296,11 @@ func (m *Manager) handle(hit HitEvent) {
 			c.Persistence[i].Error = "target artifact was not verified in quarantine"
 			continue
 		}
-		if err := removePersistence(&c.Persistence[i]); err != nil {
+		item := &c.Persistence[i]
+		precondition := fmt.Sprintf("type=%s location=%s target=%s", item.Type, item.Location, item.Target)
+		if err := runJournaled(m.root, c.ID, "", PersistenceID(item.Type, item.Location, item.Name), "remove_persistence", item.Name, precondition, func() error {
+			return removePersistence(item)
+		}); err != nil {
 			c.Persistence[i].Status = "failed"
 			c.Persistence[i].Error = err.Error()
 		} else if c.Persistence[i].Status == "pending" {

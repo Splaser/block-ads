@@ -371,6 +371,15 @@ func TestLockedArtifactStaysPending(t *testing.T) {
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("locked original missing: %v", err)
 	}
+	foundFailure := false
+	for _, operation := range readOperations(t, root) {
+		if operation.Action == "delete_original" && operation.Phase == "failed" && operation.Error != "" {
+			foundFailure = true
+		}
+	}
+	if !foundFailure {
+		t.Fatal("sharing violation was not recorded in the operation journal")
+	}
 }
 
 func TestShortcutBackupRestoresExactBytes(t *testing.T) {

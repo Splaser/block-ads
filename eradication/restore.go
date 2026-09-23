@@ -69,7 +69,7 @@ func RestoreCase(root, id string) error {
 		if a.Status != "quarantined" {
 			continue
 		}
-		if err := restoreArtifact(root, *a); err != nil {
+		if err := restoreArtifact(root, id, *a); err != nil {
 			failures = append(failures, fmt.Errorf("restore %s: %w", a.Path, err))
 			continue
 		}
@@ -79,8 +79,10 @@ func RestoreCase(root, id string) error {
 				failures = append(failures, err)
 				continue
 			}
-			record.Status = "restored"
-			if err := writeArtifactRecord(root, record); err != nil {
+			if err := runJournaled(root, id, a.ID, "", "restore_ownership", a.Path, "file hash verified after restore", func() error {
+				record.Status = "restored"
+				return writeArtifactRecord(root, record)
+			}); err != nil {
 				failures = append(failures, err)
 				continue
 			}
@@ -95,7 +97,10 @@ func RestoreCase(root, id string) error {
 			if item.Status != "removed" && item.Status != "delete_requested" {
 				continue
 			}
-			if err := restorePersistence(root, id, *item); err != nil {
+			precondition := fmt.Sprintf("type=%s location=%s backup=%s", item.Type, item.Location, item.BackupPath)
+			if err := runJournaled(root, id, "", PersistenceID(item.Type, item.Location, item.Name), "restore_persistence", item.Name, precondition, func() error {
+				return restorePersistence(root, id, *item)
+			}); err != nil {
 				failures = append(failures, fmt.Errorf("restore %s %s: %w", item.Type, item.Name, err))
 			} else {
 				item.Status = "restored"
@@ -115,7 +120,7 @@ func RestoreCase(root, id string) error {
 	return errors.Join(failures...)
 }
 
-func restoreArtifact(root string, a Artifact) error {
+func restoreArtifact(root, caseID string, a Artifact) error {
 	quarantineRoot := filepath.Join(root, "eradication", "quarantine")
 	if !beneath(a.QuarantinePath, quarantineRoot) || !inUserAppData(a.Path) {
 		return fmt.Errorf("restore path is outside allowed directories")
@@ -166,7 +171,16 @@ func restoreArtifact(root string, a Artifact) error {
 	}
 	// Keep the no-overwrite guarantee even if another process creates the
 	// original path after the Lstat check above.
-	return windows.MoveFileEx(source, target, windows.MOVEFILE_WRITE_THROUGH)
+	precondition := fmt.Sprintf("sha256=%s quarantine=%s target_absent=true", a.SHA256, a.QuarantinePath)
+	return runJournaled(root, caseID, a.ID, "", "restore_file", a.Path, precondition, func() error {
+		if err := windows.MoveFileEx(source, target, windows.MOVEFILE_WRITE_THROUGH); err != nil {
+			return err
+		}
+		if hash, err := fileSHA256(a.Path); err != nil || hash != a.SHA256 {
+			return fmt.Errorf("restored file verification failed: %v", err)
+		}
+		return nil
+	})
 }
 
 func backupWithin(root, id, path string) bool {

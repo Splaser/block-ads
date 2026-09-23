@@ -49,7 +49,16 @@ func testRoot(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	t.Cleanup(func() {
+		var err error
+		for attempt := 0; attempt < 20; attempt++ {
+			if err = os.RemoveAll(root); err == nil {
+				return
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		t.Errorf("remove test directory %s: %v", root, err)
+	})
 	return root
 }
 

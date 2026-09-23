@@ -33,8 +33,10 @@
 
 ## 3. Crash semantics / Action Journal
 
-- [ ] 为每个 destructive step 定义 `落盘 intent → 执行动作 → 验证结果 → 落盘 committed state`；明确文件同步和原子写入边界。
-- [ ] 持久化按序操作日志，记录操作 ID、case/artifact 引用、动作、前置条件、结果、错误和时间。示例：`quarantine_copy=success`、`hash_verify=success`、`delete_original=failed: sharing violation`、`remove_task=skipped`。
+当前进度：`delete_original`、`record_ownership`、`remove_persistence`、`restore_file`、`restore_ownership` 和 `restore_persistence` 已按 intent 与独立结果文件记录操作 ID、case/artifact/持久化引用、动作、前置条件、结果、错误和时间。启动时会列出没有结果的 intent；目前只报告，不自动重试或回滚。隔离副本复制、哈希校验、共享引用更新和 case 状态提交还需纳入 journal。
+
+- [ ] 为每个 destructive step 定义 `落盘 intent → 执行动作 → 验证结果 → 落盘 committed state`；已覆盖原件删除、持久化删除和恢复的关键外部动作，剩余步骤待补；文件内容在发布前同步，JSON 用临时文件与原子替换写入。
+- [ ] 持久化按序操作日志，记录操作 ID、case/artifact 引用、动作、前置条件、结果、错误和时间。关键动作已记录，仍需覆盖 `quarantine_copy`、`hash_verify`、`remove_task=skipped` 等完整序列与严格顺序号。
 - [ ] 在复制、哈希校验、删除原件、清除持久化项、写入 committed state 之前和之后分别注入崩溃。
 - [ ] 启动时从 intent、journal、case、备份与隔离副本重建进度；先验证实际外部状态，再决定继续、回滚或等待人工处理，避免重复删除。
 - [ ] 被占用文件保持 `pending`；将来若加入 reboot-delete，单独记录 `PendingReboot`，重启后验证前不能记为已删除。
