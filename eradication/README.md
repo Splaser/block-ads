@@ -11,7 +11,7 @@
 - 持久化：只有目标精确指向上述高置信度文件，才清除 Run/RunOnce、Startup 文件夹快捷方式或计划任务。服务只扫描与备份，标为 `experimental_review`，默认不删除。任务名、服务名和父目录名本身不用于判定。
 - 其他位置的 EXE、低置信度 DLL、无法解析的启动命令只记录供检查，不自动删除。
 
-每次任务在 `eradication/cases/<id>.json` 留下结果。处置前先保存 `<id>-plan.json`；计划任务 XML、快捷方式及服务注册表项另存于 `eradication/backups/<id>/`。快捷方式的 target、arguments、working directory 分开记录，并保留原始 `.lnk` 文件。隔离失败或验证失败记为 `pending`，不算完成。同一管理器内的处置串行执行，避免多个命中同时改动同一文件或持久化项。
+每次任务在 `eradication/cases/<id>.json` 留下结果。处置前先保存 `<id>-plan.json`；计划任务 XML、快捷方式及服务注册表项另存于 `eradication/backups/<id>/`。快捷方式的 target、arguments、working directory 分开记录，并保留原始 `.lnk` 文件。隔离失败或即时校验失败记为 `pending`；即时处置成功记为 `pending_verification`，直到完成持续观察及重启后验证才能称为根除完成。同一管理器内的处置串行执行，避免多个命中同时改动同一文件或持久化项。
 
 ## 恢复
 

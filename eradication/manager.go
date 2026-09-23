@@ -272,7 +272,10 @@ func caseStatus(c Case) string {
 	if c.ProcessExit != "verified" {
 		return "pending"
 	}
-	status := "completed"
+	// Removal checks prove only the immediate result. A watchdog or updater can
+	// recreate files and persistence after this worker exits. A future post-clean
+	// observation (including a reboot check) must explicitly mark completion.
+	status := "pending_verification"
 	for _, a := range c.Artifacts {
 		if a.Status == "pending" || a.Status == "failed" {
 			return "pending"

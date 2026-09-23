@@ -149,7 +149,7 @@ func TestContainRefusesMissingOrRecycledIdentity(t *testing.T) {
 
 func TestPendingCaseIsNotCompleted(t *testing.T) {
 	base := Case{ProcessExit: "verified", Artifacts: []Artifact{{Status: "quarantined"}}}
-	if got := caseStatus(base); got != "completed" {
+	if got := caseStatus(base); got != "pending_verification" {
 		t.Fatal(got)
 	}
 	base.Artifacts[0].Status = "pending"

@@ -1,6 +1,6 @@
 # 根除流程路线图
 
-按顺序推进，每项完成后记录测试场景、结果和提交。现有 case JSON 只有 `pending`、`review`、`completed` 三种汇总状态；下面的状态机、共享 artifact 和操作日志尚未实现。先把前五项验证扎实，再扩展检测范围。
+按顺序推进，每项完成后记录测试场景、结果和提交。现有 case JSON 只有 `pending`、`review`、`pending_verification` 三种汇总状态；下面的状态机、共享 artifact、操作日志和持续验证尚未实现。先把前六项验证扎实，再扩展检测范围。
 
 ## 1. HitEvent / integration correctness
 
@@ -44,16 +44,24 @@
 
 ## 5. Formal case + artifact state machine
 
-- [ ] 明确并持久化 case 流程：`Detected → Contained → EvidenceCollected → Quarantined → PersistenceRemoved → Verified → RestoreAvailable`。
+- [ ] 明确并持久化 case 流程：`Detected → Contained → EvidenceCollected → Quarantined → PersistenceRemoved → PendingVerification → Verified → RestoreAvailable`。
 - [ ] 分别定义 case、共享 artifact、持久化项及 remediation ownership 的状态与转移；部分失败进入 `PartialFailure`，延迟删除进入 `PendingReboot`。
 - [ ] 每次转移引用对应的 Action Journal 记录，定义前置条件、落盘时机、重试与恢复规则；最终状态不能替代操作历史。
 - [ ] 任一失败、未验证删除或未完成恢复都不能计为成功；为 GUI 和诊断提供可解释的状态来源。
 
-## 6. GUI read-only API
+## 6. Post-clean verification
+
+- [ ] 在处置后立即核对原 EXE/DLL 不存在、命中进程已退出、精确关联的 Run/Task/Startup 未重建；服务继续只记录 `experimental_review`。
+- [ ] 设置有界观察窗口，检查文件、进程和持久化项是否重生；记录重生时间与关联的 updater/watchdog/helper 证据。仅凭一次文件不存在不能进入 `Verified`。
+- [ ] 在许可且具备可归因数据时观察 payload 下载或重新释放迹象；网络活动本身不能单独证明与命中软件有关。
+- [ ] 重启后再次验证文件、进程和持久化项；若无法自动完成，case 保持 `pending_verification` 并明确需要人工复查。
+- [ ] 将每次验证的范围、时间、结果和证据写入 Action Journal；全部必要检查通过后才转入 `Verified`，复现则进入 `PartialFailure` 或新一轮有归属的处置。
+
+## 7. GUI read-only API
 
 - [ ] 提供稳定的只读 case、artifact 和 journal API；先展示进度、证据、失败原因和恢复可用性，再设计 GUI 恢复操作。
 - [ ] GUI 与主分支改动合并后接入，避免让界面直接推断 JSON 文件中的临时实现细节。
 
-## 7. 扩展持久化类型
+## 8. 扩展持久化类型
 
-- [ ] 前六项稳定后再评估 WMI、Winlogon、IFEO、COM 等。每新增一种类型，都先设计准确关联、完整备份、恢复、失败测试和 journal 操作。
+- [ ] 前七项稳定后再评估 WMI、Winlogon、IFEO、COM 等。每新增一种类型，都先设计准确关联、完整备份、恢复、失败测试和 journal 操作。
