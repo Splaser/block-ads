@@ -1,4 +1,4 @@
-name: Removal P1 integration
+name: Removal integration
 
 on:
   push:
@@ -27,3 +27,7 @@ jobs:
         env:
           BLOCK_ADS_TEST_REAL_PERSISTENCE: '1'
         run: go test ./tests -run '^(TestRegistryRunAndRunOnceRoundTrip|TestScheduledTaskRoundTrip)$' -count=1 -v
+      - name: Loaded DLL quarantine and restore
+        env:
+          BLOCK_ADS_TEST_LIVE_DLL: '1'
+        run: go test ./tests -run '^TestLoadedDLLQuarantineAndRestore$' -count=1 -v

@@ -4,7 +4,7 @@
 
 ## 1. HitEvent / integration correctness
 
-当前进度：`tests/` 中的可控子进程、模拟 ETW 属性、身份拒绝、双 PID 共享文件及恢复归属测试已通过。真实 Kernel Process ETW provider 测试在 Windows workflow 上通过，覆盖真实进程事件、HitEvent 和 case 的一对一追溯；本机非管理员会话仍无法启动 ETW session。尚待原 `fuck` 日志的系统级回归、真实 PID 复用压力和进程重启场景。
+当前进度：`tests/` 中的可控子进程、模拟 ETW 属性、身份拒绝、双 PID 共享文件及恢复归属测试已通过。真实 Kernel Process ETW provider 测试在 Windows workflow 上通过，覆盖真实进程事件、HitEvent 和 case 的一对一追溯；本机非管理员会话仍无法启动 ETW session。加载 DLL 的进程在隔离、恢复、重启后再次命中并产生新 case；尚待原 `fuck` 日志的系统级回归和真实 PID 复用压力。
 
 ### 1.1 Event correctness：ETW / startup scan → HitEvent
 
@@ -17,17 +17,19 @@
 ### 1.2 Remediation correctness：HitEvent → 处置
 
 - [x] 同 ID HitEvent 在单次运行中只入队一次；已退出进程通过创建时间校验，不产生第二次文件修改。跨重启队列恢复留待第 3 项。
-- [ ] 多个 PID 命中同一文件时，每个命中保留独立 case，artifact 与持久化项只实际处置一次；测试并发、排队和进程重启。
+- [x] 多个 PID 命中同一文件时，每个命中保留独立 case，artifact 与持久化项只实际处置一次；并发排队、共享归属与恢复后进程重启重新命中均有测试。
 - [x] 测试分别断言 HitEvent 数量、case 数量和实际文件隔离次数；对同 ID 重复提交及不同 PID 命中同一文件分别断言。
 - [x] 持久化 artifact ownership：多个 case 引用同一隔离记录；关联 case 先释放引用，owner 在其他引用释放后才能恢复。恢复后共享记录与 owner case 一起更新。
 - [x] 稳定 `artifact_id` 使用 `SHA256 + 规范化原路径 + 文件 identity`；哈希尚不可用时用路径与文件 identity 查找已隔离记录。同路径被替换、同内容但不同文件 identity 不合并。
 
 ## 2. Quarantine + restore round-trip
 
-- [ ] 真实隔离 EXE/DLL，恢复原路径、哈希和可执行状态；覆盖同一 artifact 被多个 case 引用时的恢复协调。
-- [ ] 验证原路径已被其他文件占用时拒绝覆盖，以及重复隔离、重复恢复的幂等行为。
-- [ ] 分别验证 Run/RunOnce、任务 XML、Startup `.lnk` 的备份与恢复；快捷方式保留 target、arguments、working directory 和原始二进制 metadata。
-- [ ] 在设计 round-trip 时同步定义各步骤的 crash 后可观察结果，避免先定恢复接口再补事务语义。
+当前进度：真实 EXE 已完成隔离、恢复及重新启动验证；本机测试已让命中进程加载无签名 DLL，随后自动隔离并恢复 EXE/DLL，Windows workflow 验证待完成。Run/RunOnce 与 Task Scheduler 的真实往返测试在 Windows workflow 上通过，Startup `.lnk` 在隔离目录内完成真实快捷方式往返测试。
+
+- [ ] 真实隔离 EXE/DLL，恢复原路径、哈希和可执行状态；覆盖同一 artifact 被多个 case 引用时的恢复协调。本机测试已通过，等待 Windows workflow 验证真实加载 DLL 的自动隔离。
+- [x] 验证原路径已被其他文件占用时拒绝覆盖，包括相同哈希占位文件和检查后竞态；重复隔离与重复恢复通过共享归属和恢复测试验证。
+- [x] 分别验证 Run/RunOnce、任务 XML、Startup `.lnk` 的备份与恢复；快捷方式保留 target、arguments、working directory 和原始二进制 metadata。
+- [x] 在 [ROUND_TRIP.md](ROUND_TRIP.md) 记录各步骤 crash 后可能观察到的状态与当前不能自动恢复的窗口，作为第 3 项 journal 的输入。
 
 ## 3. Crash semantics / Action Journal
 

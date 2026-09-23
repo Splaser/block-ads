@@ -14,6 +14,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/windows"
 )
 
 const helperEnv = "BLOCK_ADS_P1_HELPER"
@@ -21,6 +23,18 @@ const helperEnv = "BLOCK_ADS_P1_HELPER"
 func TestHelperProcess(t *testing.T) {
 	if os.Getenv(helperEnv) != "1" {
 		return
+	}
+	if dllPath := os.Getenv("BLOCK_ADS_TEST_DLL_PATH"); dllPath != "" {
+		dll, err := windows.LoadDLL(dllPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer dll.Release()
+		if marker := os.Getenv("BLOCK_ADS_TEST_DLL_READY"); marker != "" {
+			if err := os.WriteFile(marker, []byte("loaded"), 0600); err != nil {
+				t.Fatal(err)
+			}
+		}
 	}
 	time.Sleep(30 * time.Second)
 }

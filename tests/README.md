@@ -17,3 +17,17 @@ go test ./tests -run '^TestLiveKernelProcessETW$' -count=1 -v
 该测试使用独立的临时 ETW session 名称和测试子进程。普通权限下 `StartTraceW` 会返回 `Access is denied`，这不代表模拟 ETW 属性解析测试失败。
 
 `codex/removal` 每次推送也会运行 `.github/workflows/removal-p1.yml`，在 Windows runner 上执行普通测试及真实 ETW 测试。只有真实 ETW 运行通过后，路线图第 1.1 项才算完成。
+
+Run/RunOnce 和 Task Scheduler 的真实往返测试会修改执行机器的当前用户启动项及计划任务，只在隔离的 Windows runner 上开启，并由测试清理临时条目：
+
+```powershell
+$env:BLOCK_ADS_TEST_REAL_PERSISTENCE = '1'
+go test ./tests -run '^(TestRegistryRunAndRunOnceRoundTrip|TestScheduledTaskRoundTrip)$' -count=1 -v
+```
+
+真实加载 DLL 的测试需要 Windows C 编译器 `gcc`，会在隔离目录编译一个无签名测试 DLL，让可控子进程加载，再验证 EXE/DLL 隔离、恢复和重启后的重新命中：
+
+```powershell
+$env:BLOCK_ADS_TEST_LIVE_DLL = '1'
+go test ./tests -run '^TestLoadedDLLQuarantineAndRestore$' -count=1 -v
+```
