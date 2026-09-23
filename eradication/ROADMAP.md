@@ -24,9 +24,9 @@
 
 ## 2. Quarantine + restore round-trip
 
-当前进度：真实 EXE 已完成隔离、恢复及重新启动验证；本机测试已让命中进程加载无签名 DLL，随后自动隔离并恢复 EXE/DLL，Windows workflow 验证待完成。Run/RunOnce 与 Task Scheduler 的真实往返测试在 Windows workflow 上通过，Startup `.lnk` 在隔离目录内完成真实快捷方式往返测试。
+当前进度：真实 EXE 已完成隔离、恢复及重新启动验证；命中进程加载无签名 DLL 后自动隔离并恢复 EXE/DLL 的测试也在 Windows workflow 上通过。Run/RunOnce 与 Task Scheduler 的真实往返测试在 Windows workflow 上通过，Startup `.lnk` 在隔离目录内完成真实快捷方式往返测试。
 
-- [ ] 真实隔离 EXE/DLL，恢复原路径、哈希和可执行状态；覆盖同一 artifact 被多个 case 引用时的恢复协调。本机测试已通过，等待 Windows workflow 验证真实加载 DLL 的自动隔离。
+- [x] 真实隔离 EXE/DLL，恢复原路径、哈希和可执行状态；共享 artifact 的恢复归属、真实加载 DLL 的自动隔离及进程重启均通过测试。
 - [x] 验证原路径已被其他文件占用时拒绝覆盖，包括相同哈希占位文件和检查后竞态；重复隔离与重复恢复通过共享归属和恢复测试验证。
 - [x] 分别验证 Run/RunOnce、任务 XML、Startup `.lnk` 的备份与恢复；快捷方式保留 target、arguments、working directory 和原始二进制 metadata。
 - [x] 在 [ROUND_TRIP.md](ROUND_TRIP.md) 记录各步骤 crash 后可能观察到的状态与当前不能自动恢复的窗口，作为第 3 项 journal 的输入。
