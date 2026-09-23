@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -66,6 +67,21 @@ func TestLiveKernelProcessETW(t *testing.T) {
 			}
 			if match.Source != "ETW-HIT" || !match.EventAt.Before(time.Now().Add(time.Second)) || !strings.EqualFold(filepath.Clean(match.Image), filepath.Clean(path)) {
 				t.Fatalf("live ETW candidate inaccurate: %+v", match)
+			}
+			manager := eradication.NewManager(root, 1, 1)
+			var legacyCalls atomic.Int32
+			match.RuleKind, match.Rule = "folder", "Candidate"
+			hit := eradication.DispatchMatchedProcess(manager, match, func() {
+				legacyCalls.Add(1)
+				_ = child.Process.Kill()
+			})
+			manager.Close()
+			if legacyCalls.Load() != 1 || hit.IdentityError != "" || hit.FileID == "" || hit.CreatedHigh == 0 && hit.CreatedLow == 0 || hit.PID != match.PID || !hit.EventAt.Equal(match.EventAt) {
+				t.Fatalf("live ETW did not produce one valid HitEvent: %+v, legacy calls=%d", hit, legacyCalls.Load())
+			}
+			cases := readCases(t, root)
+			if len(cases) != 1 || cases[0].Hit.ID != hit.ID || cases[0].Hit.Source != "ETW-HIT" {
+				t.Fatalf("live ETW event did not produce one traceable case: %+v", cases)
 			}
 			return
 		case err := <-done:
