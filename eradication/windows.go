@@ -52,7 +52,7 @@ func processPath(h windows.Handle) (string, error) {
 	return windows.UTF16ToString(buf[:size]), nil
 }
 
-func contain(hit HitEvent) (bool, error) {
+func contain(hit HitEvent, knownQuarantined bool) (bool, error) {
 	if hit.CreatedHigh == 0 && hit.CreatedLow == 0 {
 		return false, fmt.Errorf("PID %d creation time unavailable; refusing containment", hit.PID)
 	}
@@ -75,15 +75,25 @@ func contain(hit HitEvent) (bool, error) {
 	if created.HighDateTime != hit.CreatedHigh || created.LowDateTime != hit.CreatedLow {
 		return false, fmt.Errorf("PID %d was recycled", hit.PID)
 	}
+	if event, err := windows.WaitForSingleObject(h, 0); err == nil && event == windows.WAIT_OBJECT_0 {
+		// An exited process can retain a queryable handle while its image path is
+		// no longer available. Creation time still proves this is the old PID.
+		return true, nil
+	}
 	path, err := processPath(h)
-	if err != nil || !samePath(path, hit.Image) {
+	if err != nil {
+		if event, waitErr := windows.WaitForSingleObject(h, 500); waitErr == nil && event == windows.WAIT_OBJECT_0 {
+			return true, nil
+		}
+		return false, fmt.Errorf("PID %d image unavailable while process is still live: %w", hit.PID, err)
+	}
+	if !samePath(path, hit.Image) {
 		return false, fmt.Errorf("PID %d image changed or unavailable: %q: %v", hit.PID, path, err)
 	}
 	if id, err := FileID(path); err != nil || id != hit.FileID {
-		return false, fmt.Errorf("PID %d image file identity changed or unavailable: %v", hit.PID, err)
-	}
-	if event, err := windows.WaitForSingleObject(h, 0); err == nil && event == windows.WAIT_OBJECT_0 {
-		return true, nil
+		if !knownQuarantined || !errors.Is(err, os.ErrNotExist) {
+			return false, fmt.Errorf("PID %d image file identity changed or unavailable: %v", hit.PID, err)
+		}
 	}
 	killErr := windows.TerminateProcess(h, 1)
 	event, waitErr := windows.WaitForSingleObject(h, 5000)

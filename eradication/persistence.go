@@ -29,6 +29,18 @@ type persistenceTarget struct {
 	kind string
 }
 
+// MatchPersistenceCommand applies the same precise target rule as the scanners.
+func MatchPersistenceCommand(command, artifactPath, kind string) bool {
+	_, ok := exactTarget(command, []persistenceTarget{{path: artifactPath, kind: kind}})
+	return ok
+}
+
+// MatchTaskFile inspects an existing Task Scheduler XML definition.
+func MatchTaskFile(path, artifactPath, kind string) (bool, error) {
+	match, _, err := taskTarget(path, []persistenceTarget{{path: artifactPath, kind: kind}})
+	return match != "", err
+}
+
 func systemTool(name string) (string, error) {
 	dir, err := windows.GetSystemDirectory()
 	if err != nil || dir == "" {

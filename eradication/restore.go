@@ -36,22 +36,76 @@ func RestoreCase(root, id string) error {
 	if c.ID != id {
 		return fmt.Errorf("case ID mismatch")
 	}
-	var failures []error
+	if c.Status == "released" || c.Status == "restored" {
+		return nil
+	}
+	linked := false
 	for _, a := range c.Artifacts {
+		if a.Status == "linked" {
+			linked = true
+		}
+	}
+	if linked {
+		if err := releaseLinkedCase(root, &c); err != nil {
+			return err
+		}
+		b, err := json.MarshalIndent(c, "", "  ")
+		if err != nil {
+			return err
+		}
+		return atomicWrite(casePath, b)
+	}
+	for _, a := range c.Artifacts {
+		if a.Status == "quarantined" {
+			if err := restoreOwnershipAllowed(root, id, a); err != nil {
+				return err
+			}
+		}
+	}
+	var failures []error
+	for i := range c.Artifacts {
+		a := &c.Artifacts[i]
 		if a.Status != "quarantined" {
 			continue
 		}
-		if err := restoreArtifact(root, a); err != nil {
+		if err := restoreArtifact(root, *a); err != nil {
 			failures = append(failures, fmt.Errorf("restore %s: %w", a.Path, err))
+			continue
 		}
+		if a.ID != "" {
+			record, err := readArtifactRecord(root, a.Path, a.FileID)
+			if err != nil {
+				failures = append(failures, err)
+				continue
+			}
+			record.Status = "restored"
+			if err := writeArtifactRecord(root, record); err != nil {
+				failures = append(failures, err)
+				continue
+			}
+		}
+		a.Status = "restored"
 	}
-	for _, item := range c.Persistence {
+	for i := range c.Persistence {
+		item := &c.Persistence[i]
 		if item.Status != "removed" && item.Status != "delete_requested" {
 			continue
 		}
-		if err := restorePersistence(root, id, item); err != nil {
+		if err := restorePersistence(root, id, *item); err != nil {
 			failures = append(failures, fmt.Errorf("restore %s %s: %w", item.Type, item.Name, err))
+		} else {
+			item.Status = "restored"
 		}
+	}
+	if len(failures) == 0 {
+		c.Status = "restored"
+	} else {
+		c.Status = "partial_restore"
+	}
+	if b, err := json.MarshalIndent(c, "", "  "); err != nil {
+		failures = append(failures, err)
+	} else if err := atomicWrite(casePath, b); err != nil {
+		failures = append(failures, err)
 	}
 	return errors.Join(failures...)
 }

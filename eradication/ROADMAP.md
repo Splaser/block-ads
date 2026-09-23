@@ -1,24 +1,26 @@
 # 根除流程路线图
 
-按顺序推进，每项完成后记录测试场景、结果和提交。现有 case JSON 只有 `pending`、`review`、`pending_verification` 三种汇总状态；下面的状态机、共享 artifact、操作日志和持续验证尚未实现。先把前六项验证扎实，再扩展检测范围。
+按顺序推进，每项完成后记录测试场景、结果和提交。当前已有共享 artifact 归属记录，但正式状态机、操作日志和持续验证尚未实现。先把前六项验证扎实，再扩展检测范围。
 
 ## 1. HitEvent / integration correctness
+
+当前进度：`tests/` 中的可控子进程、模拟 ETW 属性、身份拒绝、双 PID 共享文件及恢复归属测试已通过。真实 Kernel Process ETW provider 测试已编写，但当前非管理员会话启动 session 返回 `StartTraceW: Access is denied`；须按 `tests/README.md` 在管理员会话运行后才能关闭本阶段的真实 ETW 验收。
 
 ### 1.1 Event correctness：ETW / startup scan → HitEvent
 
 - [ ] 使用隔离目录与可控测试进程，分别触发启动扫描和 ETW，核对事件的 PID、父 PID、创建时间、镜像路径、文件 identity、规则、来源和时间戳。
-- [ ] 定义“唯一”的边界：同一次原始命中产生一条可追溯的 HitEvent；区分原有 20 秒去重、重复 ETW 通知和多个 PID 命中同一文件。
+- [x] 定义“唯一”的边界：同一次原始命中产生一条带 ID 的 HitEvent；20 秒进程 gate 与同 ID 入队去重分别测试，多个 PID 命中同一文件保留不同事件。
 - [ ] 核对原有 kill/日志与 HitEvent 严格一对一，且原流程行为不变。
-- [ ] 覆盖命中进程在排队前退出、PID 复用、创建时间缺失、镜像路径或文件 identity 变化。
+- [x] 覆盖排队前退出、创建时间缺失、模拟 PID 复用后的创建时间不符、镜像路径或文件 identity 变化。真实 PID 复用压力测试仍包含在上一条真实 ETW 验收中。
 - [ ] 评估 ETW 事件到 `procHit` 身份快照之间的窗口：当前事件没有可比较的创建时间，原始 `fuck` 路径仍按既有行为执行。通过真实命中测试记录这个边界，再设计不改变原拦截语义的处理。
 
 ### 1.2 Remediation correctness：HitEvent → 处置
 
-- [ ] 单个 HitEvent 只进入一次处置；重试或进程退出不产生第二次文件/持久化修改。
+- [x] 同 ID HitEvent 在单次运行中只入队一次；已退出进程通过创建时间校验，不产生第二次文件修改。跨重启队列恢复留待第 3 项。
 - [ ] 多个 PID 命中同一文件时，每个命中保留独立 case，artifact 与持久化项只实际处置一次；测试并发、排队和进程重启。
-- [ ] 区分事件重复与处置重复：测试分别断言 HitEvent 数量、case 数量和实际 destructive action 次数。
-- [ ] 设计持久化的 remediation ownership：多个 case 引用同一个 artifact，恢复需检查其他 case 的引用和处置归属，不能由任一 case 单独宣称共享 artifact 已恢复。
-- [ ] 评估稳定 `artifact_id`，候选键为 `SHA256 + 规范化原路径 + 文件 identity`。哈希尚不可用时使用临时检测身份，采集证据后再建立稳定引用；明确路径复用和同内容不同文件的语义。
+- [x] 测试分别断言 HitEvent 数量、case 数量和实际文件隔离次数；对同 ID 重复提交及不同 PID 命中同一文件分别断言。
+- [x] 持久化 artifact ownership：多个 case 引用同一隔离记录；关联 case 先释放引用，owner 在其他引用释放后才能恢复。恢复后共享记录与 owner case 一起更新。
+- [x] 稳定 `artifact_id` 使用 `SHA256 + 规范化原路径 + 文件 identity`；哈希尚不可用时用路径与文件 identity 查找已隔离记录。同路径被替换、同内容但不同文件 identity 不合并。
 
 ## 2. Quarantine + restore round-trip
 

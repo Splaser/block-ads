@@ -12,29 +12,36 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"golang.org/x/sys/windows"
 )
 
 // HitEvent is an immutable snapshot of a rule match. The process key includes
 // creation time so a recycled PID cannot become a new cleanup target.
 type HitEvent struct {
-	PID         uint32            `json:"pid"`
-	ParentPID   uint32            `json:"parent_pid"`
-	ParentImage string            `json:"parent_image,omitempty"`
-	CreatedHigh uint32            `json:"created_high,omitempty"`
-	CreatedLow  uint32            `json:"created_low,omitempty"`
-	Image       string            `json:"image"`
-	FileID      string            `json:"file_id,omitempty"`
-	Signer      string            `json:"signer,omitempty"`
-	RuleKind    string            `json:"rule_kind"`
-	Rule        string            `json:"rule"`
-	Source      string            `json:"source"`
-	DetectedAt  time.Time         `json:"detected_at"`
-	Modules     []string          `json:"modules,omitempty"`
-	ModuleIDs   map[string]string `json:"module_ids,omitempty"`
-	ModuleError string            `json:"module_error,omitempty"`
+	ID            string            `json:"id"`
+	PID           uint32            `json:"pid"`
+	ParentPID     uint32            `json:"parent_pid"`
+	ParentImage   string            `json:"parent_image,omitempty"`
+	CreatedHigh   uint32            `json:"created_high,omitempty"`
+	CreatedLow    uint32            `json:"created_low,omitempty"`
+	Image         string            `json:"image"`
+	FileID        string            `json:"file_id,omitempty"`
+	Signer        string            `json:"signer,omitempty"`
+	RuleKind      string            `json:"rule_kind"`
+	Rule          string            `json:"rule"`
+	Source        string            `json:"source"`
+	EventAt       time.Time         `json:"event_at,omitempty"`
+	DetectedAt    time.Time         `json:"detected_at"`
+	Modules       []string          `json:"modules,omitempty"`
+	ModuleIDs     map[string]string `json:"module_ids,omitempty"`
+	ModuleError   string            `json:"module_error,omitempty"`
+	IdentityError string            `json:"identity_error,omitempty"`
 }
 
 type Artifact struct {
+	ID             string `json:"id,omitempty"`
+	OwnerCaseID    string `json:"owner_case_id,omitempty"`
 	Path           string `json:"path"`
 	Kind           string `json:"kind"`
 	FileID         string `json:"file_id,omitempty"`
@@ -48,6 +55,8 @@ type Artifact struct {
 }
 
 type PersistenceItem struct {
+	ID                       string `json:"id,omitempty"`
+	OwnerCaseID              string `json:"owner_case_id,omitempty"`
 	Type                     string `json:"type"`
 	Name                     string `json:"name"`
 	Location                 string `json:"location"`
@@ -81,6 +90,7 @@ type Manager struct {
 	queueMu       sync.Mutex
 	queueReady    *sync.Cond
 	pending       []HitEvent
+	seenEvents    map[string]struct{}
 	closed        bool
 	workers       sync.WaitGroup
 	closeOnce     sync.Once
@@ -94,7 +104,7 @@ func NewManager(root string, queueSize, workerCount int) *Manager {
 	if workerCount < 1 {
 		workerCount = 2
 	}
-	m := &Manager{root: root, pending: make([]HitEvent, 0, queueSize)}
+	m := &Manager{root: root, pending: make([]HitEvent, 0, queueSize), seenEvents: map[string]struct{}{}}
 	m.queueReady = sync.NewCond(&m.queueMu)
 	for i := 0; i < workerCount; i++ {
 		m.workers.Add(1)
@@ -114,17 +124,24 @@ func NewManager(root string, queueSize, workerCount int) *Manager {
 
 // Submit runs after the legacy kill/log path. It appends exactly one job and
 // does not wait for a cleanup worker inside the ETW callback.
-func (m *Manager) Submit(hit HitEvent) {
+func (m *Manager) Submit(hit HitEvent) bool {
 	if m == nil {
-		return
+		return false
 	}
 	m.queueMu.Lock()
 	defer m.queueMu.Unlock()
 	if m.closed {
 		panic("eradication: submit after close")
 	}
+	if hit.ID != "" {
+		if _, exists := m.seenEvents[hit.ID]; exists {
+			return false
+		}
+		m.seenEvents[hit.ID] = struct{}{}
+	}
 	m.pending = append(m.pending, hit)
 	m.queueReady.Signal()
+	return true
 }
 
 func (m *Manager) next() (HitEvent, bool) {
@@ -190,8 +207,13 @@ func (m *Manager) handle(hit HitEvent) {
 	if moduleErr != nil {
 		c.Errors = append(c.Errors, "module snapshot: "+moduleErr.Error())
 	}
+	shared, alreadyQuarantined, sharedErr := m.findPreviouslyQuarantined(hit)
+	if sharedErr != nil {
+		c.Errors = append(c.Errors, "shared artifact lookup: "+sharedErr.Error())
+		return
+	}
 
-	exited, err := contain(hit)
+	exited, err := contain(hit, alreadyQuarantined)
 	if err != nil {
 		c.Errors = append(c.Errors, "containment: "+err.Error())
 	}
@@ -204,6 +226,15 @@ func (m *Manager) handle(hit HitEvent) {
 		m.OnContainment(hit, exited, err)
 	}
 	if !exited {
+		return
+	}
+	if alreadyQuarantined {
+		artifacts, items, err := m.linkSharedCase(c.ID, shared)
+		if err != nil {
+			c.Errors = append(c.Errors, "shared artifact linkage: "+err.Error())
+			return
+		}
+		c.Artifacts, c.Persistence = artifacts, items
 		return
 	}
 
@@ -249,6 +280,10 @@ func (m *Manager) handle(hit HitEvent) {
 		}
 		a.QuarantinePath = path
 		a.Status = "quarantined"
+		if err := m.recordQuarantine(c.ID, a); err != nil {
+			a.Status = "pending"
+			a.Error = "ownership record failed after quarantine: " + err.Error()
+		}
 	}
 	for i := range c.Persistence {
 		if c.Persistence[i].Status != "pending" {
@@ -264,6 +299,8 @@ func (m *Manager) handle(hit HitEvent) {
 			c.Persistence[i].Error = err.Error()
 		} else if c.Persistence[i].Status == "pending" {
 			c.Persistence[i].Status = "removed"
+			c.Persistence[i].OwnerCaseID = c.ID
+			c.Persistence[i].ID = PersistenceID(c.Persistence[i].Type, c.Persistence[i].Location, c.Persistence[i].Name)
 		}
 	}
 }
@@ -337,5 +374,13 @@ func atomicWrite(path string, data []byte) error {
 	if err := f.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	source, err := windows.UTF16PtrFromString(tmp)
+	if err != nil {
+		return err
+	}
+	destination, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return err
+	}
+	return windows.MoveFileEx(source, destination, windows.MOVEFILE_REPLACE_EXISTING|windows.MOVEFILE_WRITE_THROUGH)
 }

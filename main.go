@@ -43,12 +43,8 @@ var (
 	cfg     Config
 	cfgPath string
 
-	// 写白名单文件互斥
-	procGateMu sync.Mutex
-	procGate   = make(map[string]time.Time)
+	procGate = eradication.NewProcessGate(20 * time.Second)
 )
-
-const procGateTTL = 20 * time.Second
 
 // 日志
 var (
@@ -535,82 +531,6 @@ func inWhite(fullPath string, white map[string]struct{}) bool {
 }
 
 // 处理NT路径
-func processCreateTime(pid uint32) (windows.Filetime, error) {
-	h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
-	if err != nil {
-		return windows.Filetime{}, err
-	}
-	defer windows.CloseHandle(h)
-
-	var create, exit, kernel, user windows.Filetime
-	if err := windows.GetProcessTimes(h, &create, &exit, &kernel, &user); err != nil {
-		return windows.Filetime{}, err
-	}
-	return create, nil
-}
-
-func processGateKey(pid uint32, fullPath string) string {
-	if create, err := processCreateTime(pid); err == nil {
-		return fmt.Sprintf("%d:%d:%d", pid, create.HighDateTime, create.LowDateTime)
-	}
-	return fmt.Sprintf("%d:%s", pid, normalizeLowerPath(fullPath))
-}
-
-func enterProcessGate(pid uint32, fullPath string) bool {
-	key := processGateKey(pid, fullPath)
-	if key == "" {
-		return true
-	}
-
-	now := time.Now()
-	cutoff := now.Add(-procGateTTL)
-
-	procGateMu.Lock()
-	defer procGateMu.Unlock()
-
-	for k, seenAt := range procGate {
-		if seenAt.Before(cutoff) {
-			delete(procGate, k)
-		}
-	}
-
-	if seenAt, ok := procGate[key]; ok && now.Sub(seenAt) < procGateTTL {
-		return false
-	}
-
-	procGate[key] = now
-	return true
-}
-
-func fixPath(pid uint32, maybePath string) string {
-	translated := utils.NToWin(maybePath)
-	lp := strings.ToLower(translated)
-	if strings.Contains(lp, ":\\") && strings.HasSuffix(lp, ".exe") {
-		return translated
-	}
-	if p, err := utils.ProcPath(pid); err == nil && p != "" {
-		return utils.NToWin(p)
-	}
-	return translated
-}
-
-func pickImg(props map[string]interface{}) string {
-	keys := []string{
-		"ImageName", "ImageFileName", "FullImageName", "FileName", "Image", "ProcessName",
-	}
-	for _, k := range keys {
-		if v, ok := props[k]; ok {
-			if s, ok := v.(string); ok && s != "" {
-				return s
-			}
-			if b, ok := v.([]byte); ok && len(b) > 0 {
-				return string(b)
-			}
-		}
-	}
-	return ""
-}
-
 type hitInfo struct {
 	Kind string
 	Text string
@@ -726,7 +646,7 @@ func fuck(pid, ppid uint32, img, signer string, hits []hitInfo, src string) {
 	}
 }
 
-func procHit(pid, ppid uint32, fullPath, src string, bl *blkSet, short bool) {
+func procHit(pid, ppid uint32, fullPath, src string, eventAt time.Time, bl *blkSet, short bool) {
 	fullPath = utils.NToWin(fullPath)
 	if !utils.IsExe(fullPath) {
 		return
@@ -751,38 +671,16 @@ func procHit(pid, ppid uint32, fullPath, src string, bl *blkSet, short bool) {
 	if len(hits) == 0 {
 		return
 	}
-	if !enterProcessGate(pid, fullPath) {
+	if !procGate.Enter(pid, fullPath) {
 		return
 	}
-	created, _ := processCreateTime(pid)
-	hit := eradication.HitEvent{
-		PID: pid, ParentPID: ppid,
-		CreatedHigh: created.HighDateTime, CreatedLow: created.LowDateTime,
-		Image: fullPath, Signer: signer,
-		RuleKind: hits[0].Kind, Rule: hits[0].Text, Source: src,
-		DetectedAt: time.Now(),
-	}
-	if ppid != 0 {
-		hit.ParentImage, _ = utils.ProcPath(ppid)
-	}
-	hit.FileID, _ = eradication.FileID(fullPath)
-	modules, moduleErr := eradication.CaptureModules(pid)
-	hit.ModuleIDs = make(map[string]string)
-	for _, module := range modules {
-		if strings.EqualFold(filepath.Ext(module), ".dll") && strings.EqualFold(filepath.Dir(module), filepath.Dir(fullPath)) {
-			hit.Modules = append(hit.Modules, module)
-			if id, err := eradication.FileID(module); err == nil {
-				hit.ModuleIDs[strings.ToLower(filepath.Clean(module))] = id
-			}
-		}
-	}
-	if moduleErr != nil {
-		hit.ModuleError = moduleErr.Error()
-	}
-	// Preserve the original immediate kill and log for every matched process.
-	fuck(pid, ppid, fullPath, signer, hits, src)
-	// The downstream eradication queue receives exactly one job per legacy hit.
-	eradicator.Submit(hit)
+	eradication.DispatchMatchedProcess(eradicator, eradication.Match{
+		PID: pid, ParentPID: ppid, Image: fullPath, Signer: signer,
+		RuleKind: hits[0].Kind, Rule: hits[0].Text, Source: src, EventAt: eventAt,
+	}, func() {
+		// Preserve the original immediate kill and log for every matched process.
+		fuck(pid, ppid, fullPath, signer, hits, src)
+	})
 }
 
 // 扫描
@@ -802,12 +700,11 @@ func scanNow(bl *blkSet, short bool, workers int) {
 			if pid == 0 || pid == 4 || pid == self {
 				continue
 			}
-			fullPath, err := utils.ProcPath(pid)
-			if err != nil || fullPath == "" {
+			candidate, ok := eradication.ScanCandidate(pid)
+			if !ok {
 				continue
 			}
-
-			procHit(pid, 0, fullPath, "SCAN-HIT", bl, short)
+			procHit(candidate.PID, candidate.ParentPID, candidate.Image, candidate.Source, candidate.EventAt, bl, short)
 		}
 	}
 
@@ -853,19 +750,11 @@ func runETW(bl *blkSet, short bool) (*etw.Session, *sync.WaitGroup, error) {
 			return
 		}
 
-		//从payload取PID，不行再header
-		pid, ok := utils.GetU32(props, "ProcessID", "ProcessId", "PID")
+		candidate, ok := eradication.ProcessCreateFromProperties(props, e.Header.ProcessID, e.Header.TimeStamp)
 		if !ok {
-			pid = e.Header.ProcessID
-		}
-		ppid, _ := utils.GetU32(props, "ParentProcessID", "ParentProcessId", "ParentId", "ParentID")
-
-		img := fixPath(pid, pickImg(props))
-		if img == "" {
 			return
 		}
-
-		procHit(pid, ppid, img, "ETW-HIT", bl, short)
+		procHit(candidate.PID, candidate.ParentPID, candidate.Image, candidate.Source, candidate.EventAt, bl, short)
 	}
 
 	var wg sync.WaitGroup
