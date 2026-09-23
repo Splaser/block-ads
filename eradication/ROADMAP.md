@@ -4,11 +4,11 @@
 
 ## 1. HitEvent / integration correctness
 
-当前进度：`tests/` 中的可控子进程、模拟 ETW 属性、身份拒绝、双 PID 共享文件及恢复归属测试已通过。真实 Kernel Process ETW provider 测试已编写，但当前非管理员会话启动 session 返回 `StartTraceW: Access is denied`；须按 `tests/README.md` 在管理员会话运行后才能关闭本阶段的真实 ETW 验收。
+当前进度：`tests/` 中的可控子进程、模拟 ETW 属性、身份拒绝、双 PID 共享文件及恢复归属测试已通过。真实 Kernel Process ETW provider 测试在 Windows workflow 上通过，覆盖真实进程事件、HitEvent 和 case 的一对一追溯；本机非管理员会话仍无法启动 ETW session。尚待原 `fuck` 日志的系统级回归、真实 PID 复用压力和进程重启场景。
 
 ### 1.1 Event correctness：ETW / startup scan → HitEvent
 
-- [ ] 使用隔离目录与可控测试进程，分别触发启动扫描和 ETW，核对事件的 PID、父 PID、创建时间、镜像路径、文件 identity、规则、来源和时间戳。
+- [x] 使用隔离目录与可控测试进程，分别触发启动扫描和 ETW，核对事件的 PID、父 PID、创建时间、镜像路径、文件 identity、规则、来源和时间戳。
 - [x] 定义“唯一”的边界：同一次原始命中产生一条带 ID 的 HitEvent；20 秒进程 gate 与同 ID 入队去重分别测试，多个 PID 命中同一文件保留不同事件。
 - [ ] 核对原有 kill/日志与 HitEvent 严格一对一，且原流程行为不变。
 - [x] 覆盖排队前退出、创建时间缺失、模拟 PID 复用后的创建时间不符、镜像路径或文件 identity 变化。真实 PID 复用压力测试仍包含在上一条真实 ETW 验收中。

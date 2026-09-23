@@ -65,7 +65,7 @@ func TestLiveKernelProcessETW(t *testing.T) {
 			if match.PID != uint32(child.Process.Pid) {
 				continue
 			}
-			if match.Source != "ETW-HIT" || !match.EventAt.Before(time.Now().Add(time.Second)) || !strings.EqualFold(filepath.Clean(match.Image), filepath.Clean(path)) {
+			if match.Source != "ETW-HIT" || match.ParentPID != uint32(os.Getpid()) || !match.EventAt.Before(time.Now().Add(time.Second)) || !strings.EqualFold(filepath.Clean(match.Image), filepath.Clean(path)) {
 				t.Fatalf("live ETW candidate inaccurate: %+v", match)
 			}
 			manager := eradication.NewManager(root, 1, 1)
