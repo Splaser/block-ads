@@ -23,3 +23,7 @@ jobs:
         env:
           BLOCK_ADS_TEST_LIVE_ETW: '1'
         run: go test ./tests -run '^TestLiveKernelProcessETW$' -count=1 -v
+      - name: Real persistence round-trip tests
+        env:
+          BLOCK_ADS_TEST_REAL_PERSISTENCE: '1'
+        run: go test ./tests -run '^(TestRegistryRunAndRunOnceRoundTrip|TestScheduledTaskRoundTrip)$' -count=1 -v

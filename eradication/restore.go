@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 )
 
@@ -86,15 +87,19 @@ func RestoreCase(root, id string) error {
 		}
 		a.Status = "restored"
 	}
-	for i := range c.Persistence {
-		item := &c.Persistence[i]
-		if item.Status != "removed" && item.Status != "delete_requested" {
-			continue
-		}
-		if err := restorePersistence(root, id, *item); err != nil {
-			failures = append(failures, fmt.Errorf("restore %s %s: %w", item.Type, item.Name, err))
-		} else {
-			item.Status = "restored"
+	// A startup entry must not be re-enabled while its executable or DLL is
+	// still absent. Keep the backup and the item status for a later retry.
+	if len(failures) == 0 {
+		for i := range c.Persistence {
+			item := &c.Persistence[i]
+			if item.Status != "removed" && item.Status != "delete_requested" {
+				continue
+			}
+			if err := restorePersistence(root, id, *item); err != nil {
+				failures = append(failures, fmt.Errorf("restore %s %s: %w", item.Type, item.Name, err))
+			} else {
+				item.Status = "restored"
+			}
 		}
 	}
 	if len(failures) == 0 {
@@ -116,10 +121,7 @@ func restoreArtifact(root string, a Artifact) error {
 		return fmt.Errorf("restore path is outside allowed directories")
 	}
 	if _, err := os.Lstat(a.Path); err == nil {
-		if hash, hashErr := fileSHA256(a.Path); hashErr == nil && hash == a.SHA256 {
-			return nil
-		}
-		return fmt.Errorf("original path already exists with different content")
+		return fmt.Errorf("original path is occupied; refusing to claim an unrelated file as restored")
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
@@ -154,7 +156,17 @@ func restoreArtifact(root string, a Artifact) error {
 	if hash, err := fileSHA256(tmpPath); err != nil || hash != a.SHA256 {
 		return fmt.Errorf("restored copy hash mismatch: %v", err)
 	}
-	return os.Rename(tmpPath, a.Path)
+	source, err := windows.UTF16PtrFromString(tmpPath)
+	if err != nil {
+		return err
+	}
+	target, err := windows.UTF16PtrFromString(a.Path)
+	if err != nil {
+		return err
+	}
+	// Keep the no-overwrite guarantee even if another process creates the
+	// original path after the Lstat check above.
+	return windows.MoveFileEx(source, target, windows.MOVEFILE_WRITE_THROUGH)
 }
 
 func backupWithin(root, id, path string) bool {
