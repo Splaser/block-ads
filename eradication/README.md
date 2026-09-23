@@ -8,13 +8,13 @@
 
 - EXE：必须是已命中的完整路径、文件身份与命中时一致、可读取 SHA-256，且实际文件位于当前用户的 AppData 目录。默认复制进 `eradication/quarantine/`，校验副本和原件哈希后删除原路径。
 - DLL：必须在命中进程的模块快照中、与 EXE 同目录、位于当前用户 AppData、不是 Microsoft 签名，并与 EXE 签名一致或位于命中的目录规则下；如观察到其他进程也加载该 DLL，则不自动隔离。
-- 持久化：只有目标精确指向上述高置信度文件，才清除 Run/RunOnce、Startup 文件夹快捷方式、计划任务或服务。任务名、服务名和父目录名本身不用于判定。
+- 持久化：只有目标精确指向上述高置信度文件，才清除 Run/RunOnce、Startup 文件夹快捷方式或计划任务。服务只扫描与备份，标为 `experimental_review`，默认不删除。任务名、服务名和父目录名本身不用于判定。
 - 其他位置的 EXE、低置信度 DLL、无法解析的启动命令只记录供检查，不自动删除。
 
-每次任务在 `eradication/cases/<id>.json` 留下结果。处置前先保存 `<id>-plan.json`；计划任务 XML、快捷方式及服务注册表项另存于 `eradication/backups/<id>/`。服务删除可能需要重启才能完成，结果记为 `delete_requested`。
+每次任务在 `eradication/cases/<id>.json` 留下结果。处置前先保存 `<id>-plan.json`；计划任务 XML、快捷方式及服务注册表项另存于 `eradication/backups/<id>/`。快捷方式的 target、arguments、working directory 分开记录，并保留原始 `.lnk` 文件。隔离失败或验证失败记为 `pending`，不算完成。同一管理器内的处置串行执行，避免多个命中同时改动同一文件或持久化项。
 
 ## 恢复
 
-使用 `block-ads.exe --restore-case <id>` 从隔离区恢复 EXE/DLL，并恢复可自动重建的 Run 项、Startup 快捷方式和计划任务。已有不同内容的原路径不会被覆盖。服务备份保留为 `.reg`，其恢复需检查 SCM 状态后人工处理；命令会报告该项未自动恢复。
+使用 `block-ads.exe --restore-case <id>` 从隔离区恢复 EXE/DLL，并恢复可自动重建的 Run 项、Startup 快捷方式和计划任务。已有不同内容的原路径不会被覆盖。服务备份保留为 `.reg` 供人工检查，当前没有自动服务处置，也无需自动恢复服务。
 
 此版本不会自动接管文件所有权、更改 ACL 或安排重启后删除。普通隔离失败会在 case 结果中保留失败原因。

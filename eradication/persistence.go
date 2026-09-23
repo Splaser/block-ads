@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -14,13 +15,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 	"unicode/utf16"
 
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
-	"golang.org/x/sys/windows/svc/mgr"
 )
 
 type persistenceTarget struct {
@@ -78,8 +79,20 @@ func artifactQuarantined(artifacts []Artifact, path string) bool {
 // exactTarget accepts a full artifact path as the executable or an explicit
 // wrapper argument (for example rundll32.exe bad.dll,Entry). Names and parent
 // directories are never used to authorize removal.
+var percentEnvironment = regexp.MustCompile(`%([^%]+)%`)
+
+func expandTargetEnv(value string) string {
+	value = percentEnvironment.ReplaceAllStringFunc(value, func(match string) string {
+		if expanded, ok := os.LookupEnv(match[1 : len(match)-1]); ok {
+			return expanded
+		}
+		return match
+	})
+	return os.ExpandEnv(value)
+}
+
 func exactTarget(command string, targets []persistenceTarget) (string, bool) {
-	command = strings.TrimSpace(os.ExpandEnv(command))
+	command = strings.TrimSpace(expandTargetEnv(command))
 	if command == "" {
 		return "", false
 	}
@@ -203,31 +216,49 @@ func startupFolders() []string {
 	}
 }
 
-func shortcutTarget(path string) (string, string, error) {
+type shortcutDetails struct {
+	Target           string `json:"target"`
+	Arguments        string `json:"arguments"`
+	WorkingDirectory string `json:"working_directory"`
+}
+
+func parseShortcutDetails(out []byte) (shortcutDetails, error) {
+	var details shortcutDetails
+	if err := json.Unmarshal(out, &details); err != nil {
+		return details, err
+	}
+	if details.Target == "" {
+		return details, fmt.Errorf("shortcut has no target")
+	}
+	return details, nil
+}
+
+func shortcutTarget(path string) (shortcutDetails, error) {
 	tool, err := systemTool("WindowsPowerShell\\v1.0\\powershell.exe")
 	if err != nil {
-		return "", "", err
+		return shortcutDetails{}, err
 	}
 	// PowerShell is under System32/WindowsPowerShell, not in an application
 	// directory controlled by a matched process.
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	script := `$w = New-Object -ComObject WScript.Shell; $l = $w.CreateShortcut($env:BLOCK_ADS_LINK); [Console]::OutputEncoding = [Text.Encoding]::UTF8; Write-Output $l.TargetPath; Write-Output $l.Arguments`
+	script := `$w = New-Object -ComObject WScript.Shell; $l = $w.CreateShortcut($env:BLOCK_ADS_LINK); [Console]::OutputEncoding = [Text.Encoding]::UTF8; @{target=$l.TargetPath; arguments=$l.Arguments; working_directory=$l.WorkingDirectory} | ConvertTo-Json -Compress`
 	cmd := exec.CommandContext(ctx, tool, "-NoProfile", "-NonInteractive", "-Command", script)
 	cmd.Env = append(os.Environ(), "BLOCK_ADS_LINK="+path)
 	out, err := cmd.Output()
 	if err != nil {
-		return "", "", err
+		return shortcutDetails{}, err
 	}
-	lines := strings.Split(strings.ReplaceAll(string(out), "\r", ""), "\n")
-	if len(lines) < 1 {
-		return "", "", fmt.Errorf("shortcut has no target")
+	return parseShortcutDetails(out)
+}
+
+func shortcutMatchedTarget(link shortcutDetails, targets []persistenceTarget) (string, bool) {
+	for _, target := range targets {
+		if samePath(link.Target, target.path) {
+			return target.path, true
+		}
 	}
-	args := ""
-	if len(lines) > 1 {
-		args = strings.TrimSpace(lines[1])
-	}
-	return strings.TrimSpace(lines[0]), args, nil
+	return exactTarget(`"`+strings.Trim(link.Target, `"`)+`" `+link.Arguments, targets)
 }
 
 func scanStartupFolder(targets []persistenceTarget) ([]PersistenceItem, []string) {
@@ -246,16 +277,13 @@ func scanStartupFolder(targets []persistenceTarget) ([]PersistenceItem, []string
 				continue
 			}
 			path := filepath.Join(dir, entry.Name())
-			linkTarget, args, err := shortcutTarget(path)
+			link, err := shortcutTarget(path)
 			if err != nil {
 				errs = append(errs, path+": "+err.Error())
 				continue
 			}
-			for _, target := range targets {
-				if samePath(linkTarget, target.path) {
-					items = append(items, PersistenceItem{Type: "startup_link", Name: entry.Name(), Location: path, Target: target.path, Evidence: linkTarget + " " + args, Confidence: "HIGH", Status: "pending"})
-					break
-				}
+			if target, ok := shortcutMatchedTarget(link, targets); ok {
+				items = append(items, PersistenceItem{Type: "startup_link", Name: entry.Name(), Location: path, Target: target, Evidence: link.Target + " " + link.Arguments, ShortcutTarget: link.Target, ShortcutArguments: link.Arguments, ShortcutWorkingDirectory: link.WorkingDirectory, Confidence: "HIGH", Status: "pending"})
 			}
 		}
 	}
@@ -302,7 +330,7 @@ func taskTarget(path string, targets []persistenceTarget) (string, string, error
 		return "", "", err
 	}
 	for _, action := range task.Actions.Exec {
-		command := strings.TrimSpace(action.Command + " " + action.Arguments)
+		command := strings.TrimSpace(`"` + strings.Trim(action.Command, `"`) + `" ` + action.Arguments)
 		for _, target := range targets {
 			if samePath(action.Command, target.path) {
 				return target.path, command, nil
@@ -461,12 +489,15 @@ func removePersistence(item *PersistenceItem) error {
 			return nil
 		}
 	case "startup_link":
-		linkTarget, _, err := shortcutTarget(item.Location)
+		link, err := shortcutTarget(item.Location)
 		if err != nil {
 			return err
 		}
-		if !samePath(linkTarget, item.Target) {
+		if !samePath(link.Target, item.ShortcutTarget) || link.Arguments != item.ShortcutArguments || link.WorkingDirectory != item.ShortcutWorkingDirectory {
 			return fmt.Errorf("shortcut changed before deletion")
+		}
+		if target, ok := shortcutMatchedTarget(link, targets); !ok || !samePath(target, item.Target) {
+			return fmt.Errorf("shortcut target association changed before deletion")
 		}
 		if err := os.Remove(item.Location); err != nil {
 			return err
@@ -498,38 +529,7 @@ func removePersistence(item *PersistenceItem) error {
 		}
 		return nil
 	case "service":
-		key, err := registry.OpenKey(registry.LOCAL_MACHINE, item.Location, registry.QUERY_VALUE)
-		if err != nil {
-			return err
-		}
-		command, _, _ := key.GetStringValue("ImagePath")
-		key.Close()
-		if _, ok := exactTarget(command, targets); !ok {
-			params, err := registry.OpenKey(registry.LOCAL_MACHINE, item.Location+`\Parameters`, registry.QUERY_VALUE)
-			if err != nil {
-				return fmt.Errorf("service target changed")
-			}
-			dll, _, _ := params.GetStringValue("ServiceDll")
-			params.Close()
-			if _, ok := exactTarget(dll, targets); !ok {
-				return fmt.Errorf("service target changed")
-			}
-		}
-		manager, err := mgr.Connect()
-		if err != nil {
-			return err
-		}
-		defer manager.Disconnect()
-		service, err := manager.OpenService(item.Name)
-		if err != nil {
-			return err
-		}
-		defer service.Close()
-		if err := service.Delete(); err != nil {
-			return err
-		}
-		item.Status = "delete_requested"
-		return nil
+		return fmt.Errorf("service remediation is experimental and disabled")
 	}
 	return fmt.Errorf("unsupported persistence item %s", item.Type)
 }

@@ -20,7 +20,7 @@ import (
 )
 
 func samePath(a, b string) bool {
-	return strings.EqualFold(filepath.Clean(os.ExpandEnv(a)), filepath.Clean(os.ExpandEnv(b)))
+	return strings.EqualFold(filepath.Clean(expandTargetEnv(a)), filepath.Clean(expandTargetEnv(b)))
 }
 
 // FileID identifies the on-disk file independent of a replaceable path.
@@ -53,6 +53,12 @@ func processPath(h windows.Handle) (string, error) {
 }
 
 func contain(hit HitEvent) (bool, error) {
+	if hit.CreatedHigh == 0 && hit.CreatedLow == 0 {
+		return false, fmt.Errorf("PID %d creation time unavailable; refusing containment", hit.PID)
+	}
+	if hit.FileID == "" {
+		return false, fmt.Errorf("PID %d image file identity unavailable; refusing containment", hit.PID)
+	}
 	h, err := windows.OpenProcess(windows.PROCESS_TERMINATE|windows.PROCESS_QUERY_LIMITED_INFORMATION|windows.SYNCHRONIZE, false, hit.PID)
 	if err != nil {
 		if errors.Is(err, windows.ERROR_INVALID_PARAMETER) {
@@ -62,18 +68,19 @@ func contain(hit HitEvent) (bool, error) {
 		return false, fmt.Errorf("open PID %d: %w", hit.PID, err)
 	}
 	defer windows.CloseHandle(h)
+	var created, exited, kernel, user windows.Filetime
+	if err := windows.GetProcessTimes(h, &created, &exited, &kernel, &user); err != nil {
+		return false, err
+	}
+	if created.HighDateTime != hit.CreatedHigh || created.LowDateTime != hit.CreatedLow {
+		return false, fmt.Errorf("PID %d was recycled", hit.PID)
+	}
 	path, err := processPath(h)
 	if err != nil || !samePath(path, hit.Image) {
-		return false, fmt.Errorf("PID %d image changed or unavailable: %q: %w", hit.PID, path, err)
+		return false, fmt.Errorf("PID %d image changed or unavailable: %q: %v", hit.PID, path, err)
 	}
-	if hit.CreatedHigh != 0 || hit.CreatedLow != 0 {
-		var created, exited, kernel, user windows.Filetime
-		if err := windows.GetProcessTimes(h, &created, &exited, &kernel, &user); err != nil {
-			return false, err
-		}
-		if created.HighDateTime != hit.CreatedHigh || created.LowDateTime != hit.CreatedLow {
-			return false, fmt.Errorf("PID %d was recycled", hit.PID)
-		}
+	if id, err := FileID(path); err != nil || id != hit.FileID {
+		return false, fmt.Errorf("PID %d image file identity changed or unavailable: %v", hit.PID, err)
 	}
 	if event, err := windows.WaitForSingleObject(h, 0); err == nil && event == windows.WAIT_OBJECT_0 {
 		return true, nil

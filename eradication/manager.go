@@ -48,20 +48,24 @@ type Artifact struct {
 }
 
 type PersistenceItem struct {
-	Type       string `json:"type"`
-	Name       string `json:"name"`
-	Location   string `json:"location"`
-	Target     string `json:"target"`
-	Evidence   string `json:"evidence"`
-	ValueType  uint32 `json:"value_type,omitempty"`
-	BackupPath string `json:"backup_path,omitempty"`
-	Confidence string `json:"confidence"`
-	Status     string `json:"status"`
-	Error      string `json:"error,omitempty"`
+	Type                     string `json:"type"`
+	Name                     string `json:"name"`
+	Location                 string `json:"location"`
+	Target                   string `json:"target"`
+	Evidence                 string `json:"evidence"`
+	ValueType                uint32 `json:"value_type,omitempty"`
+	BackupPath               string `json:"backup_path,omitempty"`
+	Confidence               string `json:"confidence"`
+	Status                   string `json:"status"`
+	Error                    string `json:"error,omitempty"`
+	ShortcutTarget           string `json:"shortcut_target,omitempty"`
+	ShortcutArguments        string `json:"shortcut_arguments,omitempty"`
+	ShortcutWorkingDirectory string `json:"shortcut_working_directory,omitempty"`
 }
 
 type Case struct {
 	ID          string            `json:"id"`
+	Status      string            `json:"status"`
 	Hit         HitEvent          `json:"hit"`
 	StartedAt   time.Time         `json:"started_at"`
 	FinishedAt  time.Time         `json:"finished_at,omitempty"`
@@ -73,6 +77,7 @@ type Case struct {
 
 type Manager struct {
 	root          string
+	remediateMu   sync.Mutex
 	queueMu       sync.Mutex
 	queueReady    *sync.Cond
 	pending       []HitEvent
@@ -159,8 +164,13 @@ func newCaseID(hit HitEvent) string {
 }
 
 func (m *Manager) handle(hit HitEvent) {
-	c := Case{ID: newCaseID(hit), Hit: hit, StartedAt: time.Now(), Artifacts: []Artifact{}, Persistence: []PersistenceItem{}}
+	// Keep a case for every hit, while serializing mutations of shared files and
+	// persistence entries across workers.
+	m.remediateMu.Lock()
+	defer m.remediateMu.Unlock()
+	c := Case{ID: newCaseID(hit), Status: "pending", Hit: hit, StartedAt: time.Now(), Artifacts: []Artifact{}, Persistence: []PersistenceItem{}}
 	defer func() {
+		c.Status = caseStatus(c)
 		c.FinishedAt = time.Now()
 		if err := m.saveCase(c); err != nil {
 			log.Printf("[ERADICATION] case %s save failed: %v", c.ID, err)
@@ -203,8 +213,15 @@ func (m *Manager) handle(hit HitEvent) {
 	c.Persistence = items
 	c.Errors = append(c.Errors, scanErrors...)
 	for i := range c.Persistence {
+		if c.Persistence[i].Type == "service" {
+			c.Persistence[i].Status = "experimental_review"
+			c.Persistence[i].Error = "service remediation is experimental; SCM configuration is not automatically restored"
+			log.Printf("[ERADICATION] case %s service %s requires experimental review", c.ID, c.Persistence[i].Name)
+		}
 		if err := m.backupPersistence(c.ID, &c.Persistence[i]); err != nil {
-			c.Persistence[i].Status = "review"
+			if c.Persistence[i].Type != "service" {
+				c.Persistence[i].Status = "review"
+			}
 			c.Persistence[i].Error = "backup failed: " + err.Error()
 		}
 	}
@@ -226,7 +243,7 @@ func (m *Manager) handle(hit HitEvent) {
 		}
 		path, err := m.quarantine(c.ID, hit, *a)
 		if err != nil {
-			a.Status = "failed"
+			a.Status = "pending"
 			a.Error = err.Error()
 			continue
 		}
@@ -238,7 +255,7 @@ func (m *Manager) handle(hit HitEvent) {
 			continue
 		}
 		if !artifactQuarantined(c.Artifacts, c.Persistence[i].Target) {
-			c.Persistence[i].Status = "review"
+			c.Persistence[i].Status = "pending"
 			c.Persistence[i].Error = "target artifact was not verified in quarantine"
 			continue
 		}
@@ -249,6 +266,30 @@ func (m *Manager) handle(hit HitEvent) {
 			c.Persistence[i].Status = "removed"
 		}
 	}
+}
+
+func caseStatus(c Case) string {
+	if c.ProcessExit != "verified" {
+		return "pending"
+	}
+	status := "completed"
+	for _, a := range c.Artifacts {
+		if a.Status == "pending" || a.Status == "failed" {
+			return "pending"
+		}
+		if a.Status == "review" {
+			status = "review"
+		}
+	}
+	for _, item := range c.Persistence {
+		if item.Status == "pending" || item.Status == "failed" || item.Status == "delete_requested" {
+			return "pending"
+		}
+		if item.Status == "review" || item.Status == "experimental_review" {
+			status = "review"
+		}
+	}
+	return status
 }
 
 func (m *Manager) saveCase(c Case) error {
