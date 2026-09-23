@@ -4,6 +4,7 @@ package main
 
 import (
 	"sync"
+	"time"
 
 	"github.com/AzureIvory/winui/core"
 	"github.com/AzureIvory/winui/widgets"
@@ -73,8 +74,10 @@ type nativeUI struct {
 	stopCh   chan struct{}
 	stopOnce sync.Once
 
-	stMu   sync.Mutex
-	stamps map[string]fStamp
+	stMu        sync.Mutex
+	stamps      map[string]fStamp
+	searchTimer *time.Timer
+	searchSeq   uint64
 
 	curKey            string
 	filter            string
@@ -227,6 +230,8 @@ func runNativeUI(dat *appDat, dir string) error {
 		Title:          "名单管理",
 		Width:          980,
 		Height:         720,
+		MinWidth:       900,
+		MinHeight:      650,
 		Style:          core.DefaultWindowStyle,
 		ExStyle:        core.DefaultWindowExStyle,
 		Cursor:         core.CursorArrow,

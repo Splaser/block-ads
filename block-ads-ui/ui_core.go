@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -49,6 +50,9 @@ func (u *nativeUI) onDestroy(_ *core.App, _ *widgets.Scene) {
 	u.stopOnce.Do(func() {
 		close(u.stopCh)
 	})
+	if u.searchTimer != nil {
+		u.searchTimer.Stop()
+	}
 	if u.icon != nil {
 		_ = u.icon.Close()
 		u.icon = nil
@@ -61,6 +65,12 @@ func (u *nativeUI) onDestroy(_ *core.App, _ *widgets.Scene) {
 		_ = u.restoreImage.Close()
 		u.restoreImage = nil
 	}
+	for _, img := range []*core.Image{u.fakeImage, u.gitImage, u.startImage, u.enableImage, u.disabledImage} {
+		if img != nil {
+			_ = img.Close()
+		}
+	}
+	u.fakeImage, u.gitImage, u.startImage, u.enableImage, u.disabledImage = nil, nil, nil, nil, nil
 }
 
 func (u *nativeUI) buildRoot() {
@@ -110,13 +120,16 @@ func (u *nativeUI) buildRoot() {
 	u.root.AddAll(u.header, u.sidebar, u.rulesCard, u.logsCard, u.mask)
 }
 
-// locFiles 返回需监听的本地 txt 文件。
+// locFiles 返回需监听的规则、备注和用户增量文件。
 func (u *nativeUI) locFiles() []string {
-	fs := make([]string, 0, len(lstMap)+1)
+	fs := make([]string, 0, len(lstMap)+2)
 	for _, name := range lstMap {
 		fs = append(fs, filepath.Join(u.dat.dir, name))
 	}
-	fs = append(fs, filepath.Join(u.dat.dir, noteFile))
+	fs = append(fs,
+		filepath.Join(u.dat.dir, noteFile),
+		filepath.Join(u.dat.dir, userRulesFile),
+	)
 	return fs
 }
 
@@ -125,7 +138,7 @@ func (u *nativeUI) markFiles() {
 	u.stMu.Lock()
 	defer u.stMu.Unlock()
 
-	u.stamps = make(map[string]fStamp, len(lstMap)+1)
+	u.stamps = make(map[string]fStamp, len(lstMap)+2)
 	for _, p := range u.locFiles() {
 		fi, err := os.Stat(p)
 		if err != nil {
@@ -144,7 +157,7 @@ func (u *nativeUI) chgFiles() bool {
 	defer u.stMu.Unlock()
 
 	if u.stamps == nil {
-		u.stamps = make(map[string]fStamp, len(lstMap)+1)
+		u.stamps = make(map[string]fStamp, len(lstMap)+2)
 		for _, p := range u.locFiles() {
 			fi, err := os.Stat(p)
 			if err != nil {
@@ -194,18 +207,22 @@ func (u *nativeUI) startPolling() {
 				status := u.currentStatus()
 				logs := u.dat.log()
 				chg := u.chgFiles()
+				if chg {
+					u.dat.reloadLocal()
+				}
 
 				_ = u.app.Post(func() {
-					u.refreshStatus(status)
-
-					// 本地 txt 有变化时才重载规则。
-					if chg {
-						u.reloadData()
-						return
+					if status != u.status {
+						u.refreshStatus(status)
 					}
 
-					u.logs = logs
-					u.refreshLogList()
+					if chg {
+						u.refreshData()
+					}
+					if !slices.Equal(u.logs, logs) {
+						u.logs = logs
+						u.refreshLogList()
+					}
 				})
 			}
 		}
@@ -215,12 +232,17 @@ func (u *nativeUI) startPolling() {
 func (u *nativeUI) reloadData() {
 	u.dat.reloadLocal()
 	u.markFiles()
+	u.refreshData()
+	u.logs = u.dat.log()
+	u.refreshLogList()
+}
+
+// refreshData 从已载入的内存视图刷新控件，避免在 UI 线程读取规则文件。
+func (u *nativeUI) refreshData() {
 	u.data = u.dat.all()
 	u.notes = u.dat.note()
-	u.logs = u.dat.log()
 	u.refreshSidebar()
 	u.refreshRuleList()
-	u.refreshLogList()
 	u.refreshAboutVersion()
 }
 
@@ -591,9 +613,6 @@ func (u *nativeUI) layout(size core.Size) {
 	footerH := u.dp(28)
 
 	contentBottom := h - m - footerH
-	if contentBottom-topY < u.dp(480) {
-		contentBottom = topY + u.dp(480)
-	}
 	contentPlan := planContentLayout(topY, contentBottom, gap, u.dp(44), u.dp(152), len(u.logRows), u.panelFocus)
 	rulesH := contentPlan.RulesH
 	logsY := contentPlan.LogsY
