@@ -1,6 +1,7 @@
 package main
 
 import (
+	"block-ads/eradication"
 	"block-ads/utils"
 	"bufio"
 	"encoding/json"
@@ -51,8 +52,9 @@ const procGateTTL = 20 * time.Second
 
 // 日志
 var (
-	appDir string
-	logDir string //日志目录
+	appDir     string
+	logDir     string //日志目录
+	eradicator *eradication.Manager
 )
 
 // 黑名单 + 白名单
@@ -752,8 +754,35 @@ func procHit(pid, ppid uint32, fullPath, src string, bl *blkSet, short bool) {
 	if !enterProcessGate(pid, fullPath) {
 		return
 	}
-	//干掉黑名单
+	created, _ := processCreateTime(pid)
+	hit := eradication.HitEvent{
+		PID: pid, ParentPID: ppid,
+		CreatedHigh: created.HighDateTime, CreatedLow: created.LowDateTime,
+		Image: fullPath, Signer: signer,
+		RuleKind: hits[0].Kind, Rule: hits[0].Text, Source: src,
+		DetectedAt: time.Now(),
+	}
+	if ppid != 0 {
+		hit.ParentImage, _ = utils.ProcPath(ppid)
+	}
+	hit.FileID, _ = eradication.FileID(fullPath)
+	modules, moduleErr := eradication.CaptureModules(pid)
+	hit.ModuleIDs = make(map[string]string)
+	for _, module := range modules {
+		if strings.EqualFold(filepath.Ext(module), ".dll") && strings.EqualFold(filepath.Dir(module), filepath.Dir(fullPath)) {
+			hit.Modules = append(hit.Modules, module)
+			if id, err := eradication.FileID(module); err == nil {
+				hit.ModuleIDs[strings.ToLower(filepath.Clean(module))] = id
+			}
+		}
+	}
+	if moduleErr != nil {
+		hit.ModuleError = moduleErr.Error()
+	}
+	// Preserve the original immediate kill and log for every matched process.
 	fuck(pid, ppid, fullPath, signer, hits, src)
+	// The downstream eradication queue receives exactly one job per legacy hit.
+	eradicator.Submit(hit)
 }
 
 // 扫描
@@ -876,9 +905,22 @@ func run() error {
 	blkData = bl
 	blkLast = time.Now()
 	blkMu.Unlock()
-
-	// 并发扫描
-	go scanNow(bl, *fShort, *fWork)
+	eradicator = eradication.NewManager(appDir, 256, 2)
+	eradicator.OnContainment = func(hit eradication.HitEvent, exited bool, err error) {
+		if !exited || err != nil {
+			log.Printf("[ERADICATION] PID %d exit verification failed: %v", hit.PID, err)
+		}
+	}
+	// 并发扫描；退出时先等扫描结束，再关闭根除队列。
+	scanDone := make(chan struct{})
+	go func() {
+		defer close(scanDone)
+		scanNow(bl, *fShort, *fWork)
+	}()
+	defer func() {
+		<-scanDone
+		eradicator.Close()
+	}()
 
 	//runETW
 	session, wg, err := runETW(bl, *fShort)
@@ -898,6 +940,17 @@ func run() error {
 }
 
 func main() {
+	if len(os.Args) == 3 && os.Args[1] == "--restore-case" {
+		exe, err := os.Executable()
+		if err == nil {
+			err = eradication.RestoreCase(filepath.Dir(exe), os.Args[2])
+		}
+		if err != nil {
+			log.Fatalf("[RESTORE] %v", err)
+		}
+		log.Printf("[RESTORE] case %s restored", os.Args[2])
+		return
+	}
 	if err := run(); err != nil {
 		log.Fatalf("[FATAL] %v", err)
 	}
