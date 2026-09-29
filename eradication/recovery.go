@@ -154,7 +154,9 @@ func inspectRestorePreparationGaps(root string, existing []RecoveryFinding) ([]R
 			blocked[key] = true
 		}
 		if operation.Phase == "committed" && (operation.Action == "restore_copy" || operation.Action == "restore_hash_verify") {
-			if current, ok := preparations[key]; !ok || operation.At.After(current.At) {
+			current, ok := preparations[key]
+			if !ok || operation.Action == "restore_hash_verify" && current.Action == "restore_copy" ||
+				operation.Action == current.Action && operation.At.After(current.At) {
 				preparations[key] = operation
 			}
 		}
