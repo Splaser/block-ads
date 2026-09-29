@@ -33,11 +33,11 @@
 
 ## 3. Crash semantics / Action Journal
 
-当前进度：`quarantine_copy`、`quarantine_hash_verify`、`quarantine_publish`、`delete_original`、`record_ownership`、`remove_persistence`、`restore_file`、`restore_ownership` 和 `restore_persistence` 已按 intent 与独立结果文件记录操作 ID、case/artifact/持久化引用、动作、前置条件、结果、错误和时间。发布隔离副本使用不可覆盖的移动。文件操作的 intent 另存预期哈希、文件 identity 和隔离路径；Run/Task/Startup 的删除 intent 记录精确位置，文件型持久化项还记录备份哈希。启动时只读核对未决操作、缺少最终 case 的 plan，以及已提交恢复动作与旧 case 状态的冲突；同一路径的新命中保留 case，暂停新的自动处置。子进程测试已在隔离副本复制、哈希校验、发布、原件删除、Startup 删除和文件恢复的 intent 后、外部动作后、结果落盘后注入崩溃并核对现场；Run/Task 删除的对应测试已加入 Windows workflow。当前不自动重试或回滚。共享引用更新和 case 状态提交还需纳入 journal。
+当前进度：`quarantine_copy`、`quarantine_hash_verify`、`quarantine_publish`、`delete_original`、`record_ownership`、`remove_persistence`、`restore_file`、`restore_ownership` 和 `restore_persistence` 已按 intent 与独立结果文件记录操作 ID、case/artifact/持久化引用、动作、前置条件、结果、错误和时间。发布隔离副本使用不可覆盖的移动。文件操作的 intent 另存预期哈希、文件 identity 和隔离路径；Run/Task/Startup 的删除 intent 记录精确位置，文件型持久化项还记录备份哈希。启动时只读核对未决操作、缺少最终 case 的 plan，以及已提交恢复动作与旧 case 状态的冲突；同一路径的新命中保留 case，暂停新的自动处置。子进程测试已在隔离副本复制、哈希校验、发布、原件删除、Run/Task/Startup 删除和文件恢复的 intent 后、外部动作后、结果落盘后注入崩溃并核对现场；Run/Task 的真实删除边界测试已在 Windows workflow 上通过。当前不自动重试或回滚。共享引用更新和 case 状态提交还需纳入 journal。
 
 - [ ] 为每个 destructive step 定义 `落盘 intent → 执行动作 → 验证结果 → 落盘 committed state`；已覆盖隔离复制、哈希、发布、原件删除、持久化删除和恢复的关键外部动作，共享引用与最终 case 状态提交待补；文件内容在发布前同步，JSON 用临时文件与原子替换写入。
 - [ ] 持久化按序操作日志，记录操作 ID、case/artifact 引用、动作、前置条件、结果、错误和时间。关键动作已记录，仍需覆盖共享引用、case 提交和跳过动作，并给 case 内操作增加严格顺序号。
-- [ ] 在复制、哈希校验、删除原件、清除持久化项、写入 committed state 之前和之后分别注入崩溃。已覆盖文件与 Startup 的三个日志边界，Task/Run 的真实删除测试已接入 Windows workflow；仍需共享引用和最终 case 提交边界。
+- [ ] 在复制、哈希校验、删除原件、清除持久化项、写入 committed state 之前和之后分别注入崩溃。文件与 Run/Task/Startup 的三个日志边界已覆盖；仍需共享引用和最终 case 提交边界。
 - [ ] 启动时从 intent、journal、case、备份与隔离副本重建进度；目前已只读核对文件、归属记录、缺失的最终 case 与滞后的恢复状态，暂停同路径新的自动处置，仍需关联持久化备份，再决定安全继续、回滚或人工处理。
 - [ ] 被占用文件保持 `pending`；将来若加入 reboot-delete，单独记录 `PendingReboot`，重启后验证前不能记为已删除。
 
