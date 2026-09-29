@@ -5,10 +5,15 @@ package tests
 import (
 	"block-ads/eradication"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
+
+	"golang.org/x/sys/windows/registry"
 )
 
 const crashExitCode = 87
@@ -325,4 +330,113 @@ func TestCrashAtStartupRemovalBoundaries(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCrashAtRunRemovalBoundaries(t *testing.T) {
+	if os.Getenv("BLOCK_ADS_TEST_REAL_PERSISTENCE") != "1" {
+		t.Skip("requires an isolated Windows runner with registry write access")
+	}
+	for _, tc := range []struct {
+		stage, disposition string
+		valuePresent       bool
+	}{
+		{"after_intent", "not_observed", true},
+		{"after_action", "observed_uncommitted", false},
+		{"after_result", "manual_review", false},
+	} {
+		t.Run(tc.stage, func(t *testing.T) {
+			root := testRoot(t)
+			path := filepath.Join(root, "AppData", "Roaming", "Bad", "sample.exe")
+			if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte("controlled artifact"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			key, _, err := registry.CreateKey(registry.CURRENT_USER, `Software\Microsoft\Windows\CurrentVersion\Run`, registry.QUERY_VALUE|registry.SET_VALUE)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer key.Close()
+			name := fmt.Sprintf("BlockAdsCrash-%d-%d", os.Getpid(), time.Now().UnixNano())
+			t.Cleanup(func() { _ = key.DeleteValue(name) })
+			command := `"` + path + `" --update`
+			if err := key.SetStringValue(name, command); err != nil {
+				t.Fatal(err)
+			}
+			runCrashChild(t, root, "remove_persistence", tc.stage, "")
+			value, _, err := key.GetStringValue(name)
+			if tc.valuePresent && (err != nil || value != command) || !tc.valuePresent && !errors.Is(err, registry.ErrNotExist) {
+				t.Fatalf("Run value presence after %s: %q, %v", tc.stage, value, err)
+			}
+			findings, err := eradication.InspectRecovery(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !hasRemovalFinding(findings, tc.stage, tc.disposition, "registry_run", path) {
+				t.Fatalf("Run removal crash misclassified: %+v", findings)
+			}
+		})
+	}
+}
+
+func TestCrashAtTaskRemovalBoundaries(t *testing.T) {
+	if os.Getenv("BLOCK_ADS_TEST_REAL_PERSISTENCE") != "1" {
+		t.Skip("requires an isolated Windows runner with Task Scheduler access")
+	}
+	tool, err := exec.LookPath("schtasks.exe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		stage, disposition string
+		taskPresent        bool
+	}{
+		{"after_intent", "not_observed", true},
+		{"after_action", "observed_uncommitted", false},
+		{"after_result", "manual_review", false},
+	} {
+		t.Run(tc.stage, func(t *testing.T) {
+			root := testRoot(t)
+			path := filepath.Join(root, "AppData", "Roaming", "Bad", "sample.exe")
+			if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte("controlled artifact"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			name := fmt.Sprintf(`\BlockAdsCrash-%d-%d`, os.Getpid(), time.Now().UnixNano())
+			t.Cleanup(func() { _ = exec.Command(tool, "/Delete", "/TN", name, "/F").Run() })
+			command := `"` + path + `" --update`
+			if out, err := exec.Command(tool, "/Create", "/TN", name, "/SC", "DAILY", "/ST", "23:59", "/TR", command, "/F").CombinedOutput(); err != nil {
+				t.Fatalf("create task: %v: %s", err, out)
+			}
+			taskPath := filepath.Join(os.Getenv("SystemRoot"), "System32", "Tasks", strings.TrimPrefix(name, `\`))
+			runCrashChild(t, root, "remove_persistence", tc.stage, "")
+			_, err := os.Stat(taskPath)
+			if tc.taskPresent && err != nil || !tc.taskPresent && !os.IsNotExist(err) {
+				t.Fatalf("task presence after %s: %v", tc.stage, err)
+			}
+			findings, err := eradication.InspectRecovery(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !hasRemovalFinding(findings, tc.stage, tc.disposition, "task", path) {
+				t.Fatalf("task removal crash misclassified: %+v", findings)
+			}
+		})
+	}
+}
+
+func hasRemovalFinding(findings []eradication.RecoveryFinding, stage, disposition, kind, path string) bool {
+	for _, finding := range findings {
+		if stage == "after_result" {
+			if finding.Operation.Action == "case_commit" && finding.Disposition == disposition {
+				return true
+			}
+		} else if finding.Operation.Action == "remove_persistence" && finding.Operation.PersistenceType == kind && finding.Operation.RelatedPath == path && finding.Disposition == disposition {
+			return true
+		}
+	}
+	return false
 }
