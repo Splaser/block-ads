@@ -19,6 +19,7 @@ import (
 type OperationEntry struct {
 	ID                  string    `json:"id"`
 	CaseID              string    `json:"case_id"`
+	OwnerCaseID         string    `json:"owner_case_id,omitempty"`
 	ArtifactID          string    `json:"artifact_id,omitempty"`
 	PersistenceID       string    `json:"persistence_id,omitempty"`
 	PersistenceType     string    `json:"persistence_type,omitempty"`
@@ -27,6 +28,7 @@ type OperationEntry struct {
 	ExpectedValue       string    `json:"expected_value,omitempty"`
 	ValueType           uint32    `json:"value_type,omitempty"`
 	ExpectedHash        string    `json:"expected_sha256,omitempty"`
+	PreviousHash        string    `json:"previous_sha256,omitempty"`
 	ExpectedFileID      string    `json:"expected_file_id,omitempty"`
 	QuarantinePath      string    `json:"quarantine_path,omitempty"`
 	RelatedPath         string    `json:"related_path,omitempty"`

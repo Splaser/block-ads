@@ -136,8 +136,15 @@ func (m *Manager) linkSharedCase(caseID string, primary ArtifactRecord) ([]Artif
 		if hash, err := fileSHA256(record.QuarantinePath); err != nil || hash != record.SHA256 {
 			return nil, nil, fmt.Errorf("shared artifact quarantine changed: %s: %v", a.Path, err)
 		}
-		addCaseReference(&record, caseID)
-		if err := writeArtifactRecord(m.root, record); err != nil {
+		if err := runJournaled(m.root, OperationEntry{
+			CaseID: caseID, OwnerCaseID: record.OwnerCaseID, ArtifactID: record.ID,
+			Action: "link_reference", Target: a.Path, RelatedPath: a.Path,
+			ExpectedHash: record.SHA256, ExpectedFileID: record.FileID, QuarantinePath: record.QuarantinePath,
+			Precondition: "owner artifact is quarantined; reference case is absent",
+		}, m.OnOperation, func() error {
+			addCaseReference(&record, caseID)
+			return writeArtifactRecord(m.root, record)
+		}); err != nil {
 			return nil, nil, err
 		}
 		a.Status = "linked"
@@ -206,7 +213,7 @@ func restoreOwnershipAllowed(root, caseID string, a Artifact) error {
 	return nil
 }
 
-func releaseLinkedCase(root string, c *Case) error {
+func releaseLinkedCase(root string, c *Case, observer OperationObserver) error {
 	if c == nil {
 		return fmt.Errorf("nil case")
 	}
@@ -234,8 +241,15 @@ func releaseLinkedCase(root string, c *Case) error {
 		if !found {
 			return fmt.Errorf("case %s is not a reference to artifact %s", c.ID, a.ID)
 		}
-		record.CaseIDs = references
-		if err := writeArtifactRecord(root, record); err != nil {
+		if err := runJournaled(root, OperationEntry{
+			CaseID: c.ID, OwnerCaseID: record.OwnerCaseID, ArtifactID: record.ID,
+			Action: "release_reference", Target: a.Path, RelatedPath: a.Path,
+			ExpectedHash: record.SHA256, ExpectedFileID: record.FileID, QuarantinePath: record.QuarantinePath,
+			Precondition: "linked case is present in quarantined artifact references",
+		}, observer, func() error {
+			record.CaseIDs = references
+			return writeArtifactRecord(root, record)
+		}); err != nil {
 			return err
 		}
 		a.Status = "released"

@@ -4,6 +4,7 @@ package eradication
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -384,7 +385,11 @@ func caseStatus(c Case) string {
 }
 
 func (m *Manager) saveCase(c Case) error {
-	dir := filepath.Join(m.root, "eradication", "cases")
+	return commitCase(m.root, c, m.OnOperation)
+}
+
+func commitCase(root string, c Case, observer OperationObserver) error {
+	dir := filepath.Join(root, "eradication", "cases")
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return err
 	}
@@ -392,7 +397,33 @@ func (m *Manager) saveCase(c Case) error {
 	if err != nil {
 		return err
 	}
-	return atomicWrite(filepath.Join(dir, c.ID+".json"), b)
+	sum := sha256.Sum256(b)
+	path := filepath.Join(dir, c.ID+".json")
+	previousHash, err := fileSHA256(path)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if os.IsNotExist(err) {
+		previousHash = ""
+	}
+	return runJournaled(root, OperationEntry{
+		CaseID: c.ID, Action: "case_commit", Target: c.Hit.Image, RelatedPath: c.Hit.Image,
+		ExpectedHash: hex.EncodeToString(sum[:]), PreviousHash: previousHash,
+		Precondition: "case snapshot finalized; previous snapshot hash recorded",
+	}, observer, func() error {
+		currentHash, err := fileSHA256(path)
+		if previousHash == "" && !os.IsNotExist(err) || previousHash != "" && (err != nil || currentHash != previousHash) {
+			return fmt.Errorf("case snapshot changed before commit: %v", err)
+		}
+		if err := atomicWrite(path, b); err != nil {
+			return err
+		}
+		hash, err := fileSHA256(path)
+		if err != nil || hash != hex.EncodeToString(sum[:]) {
+			return fmt.Errorf("case snapshot verification failed: %v", err)
+		}
+		return nil
+	})
 }
 
 func (m *Manager) savePlan(c Case) error {

@@ -37,8 +37,12 @@ func InspectRecovery(root string) ([]RecoveryFinding, error) {
 			finding.Disposition, finding.Evidence = inspectQuarantinePreparation(root, operation)
 		case "record_ownership", "restore_ownership":
 			finding.Disposition, finding.Evidence = inspectOwnershipOperation(root, operation)
+		case "link_reference", "release_reference":
+			finding.Disposition, finding.Evidence = inspectReferenceOperation(root, operation)
 		case "remove_persistence":
 			finding.Disposition, finding.Evidence = inspectPersistenceRemoval(root, operation)
+		case "case_commit":
+			finding.Disposition, finding.Evidence = inspectCaseCommit(root, operation)
 		}
 		findings = append(findings, finding)
 	}
@@ -47,7 +51,130 @@ func InspectRecovery(root string) ([]RecoveryFinding, error) {
 		return nil, err
 	}
 	findings = append(findings, caseFindings...)
+	sharedFindings, err := inspectSharedCommitGaps(root, findings)
+	if err != nil {
+		return nil, err
+	}
+	findings = append(findings, sharedFindings...)
 	return findings, nil
+}
+
+func inspectSharedCommitGaps(root string, existing []RecoveryFinding) ([]RecoveryFinding, error) {
+	dir := filepath.Join(root, "eradication", "journal")
+	seen := map[string]bool{}
+	for _, finding := range existing {
+		seen[finding.Operation.CaseID+"\x00"+strings.ToLower(filepath.Clean(finding.Operation.Target))] = true
+	}
+	findings := []RecoveryFinding{}
+	err := filepath.WalkDir(dir, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), "-committed.json") {
+			return nil
+		}
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		var operation OperationEntry
+		if err := json.Unmarshal(b, &operation); err != nil {
+			return err
+		}
+		if operation.Action != "link_reference" && operation.Action != "release_reference" {
+			return nil
+		}
+		key := operation.CaseID + "\x00" + strings.ToLower(filepath.Clean(operation.Target))
+		if seen[key] {
+			return nil
+		}
+		casePath := filepath.Join(root, "eradication", "cases", operation.CaseID+".json")
+		caseBytes, err := os.ReadFile(casePath)
+		if errors.Is(err, os.ErrNotExist) {
+			seen[key] = true
+			findings = append(findings, RecoveryFinding{Operation: operation, Disposition: "manual_review", Evidence: "shared reference committed but final case is missing"})
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if operation.Action == "release_reference" {
+			var c Case
+			if err := json.Unmarshal(caseBytes, &c); err != nil || c.ID != operation.CaseID {
+				return fmt.Errorf("invalid shared case %s: %v", casePath, err)
+			}
+			for _, artifact := range c.Artifacts {
+				if samePath(artifact.Path, operation.Target) && artifact.Status == "linked" {
+					seen[key] = true
+					findings = append(findings, RecoveryFinding{Operation: operation, Disposition: "manual_review", Evidence: "reference release committed but case still reports linked artifact"})
+					break
+				}
+			}
+		}
+		return nil
+	})
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	return findings, err
+}
+
+func inspectReferenceOperation(root string, operation OperationEntry) (string, string) {
+	if operation.CaseID == "" || operation.OwnerCaseID == "" || operation.CaseID == operation.OwnerCaseID ||
+		operation.ExpectedHash == "" || operation.ExpectedFileID == "" ||
+		operation.ArtifactID != ArtifactID(operation.Target, operation.ExpectedFileID, operation.ExpectedHash) {
+		return "manual_review", "reference intent lacks a complete artifact and case identity"
+	}
+	record, err := readArtifactRecord(root, operation.Target, operation.ExpectedFileID)
+	if err != nil {
+		return "conflict", fmt.Sprintf("shared artifact record unavailable: %v", err)
+	}
+	if record.ID != operation.ArtifactID || record.OwnerCaseID != operation.OwnerCaseID ||
+		record.QuarantinePath != operation.QuarantinePath || record.Status != "quarantined" {
+		return "conflict", "shared artifact record differs from reference intent"
+	}
+	present := false
+	for _, id := range record.CaseIDs {
+		if id == operation.CaseID {
+			present = true
+			break
+		}
+	}
+	if operation.Action == "link_reference" && present || operation.Action == "release_reference" && !present {
+		return "observed_uncommitted", "shared artifact reference changed but journal result is absent"
+	}
+	return "not_observed", "shared artifact reference still matches the precondition"
+}
+
+func inspectCaseCommit(root string, operation OperationEntry) (string, string) {
+	if operation.ExpectedHash == "" || operation.CaseID == "" || operation.RelatedPath == "" || !samePath(operation.Target, operation.RelatedPath) {
+		return "manual_review", "case commit intent lacks snapshot hash or hit association"
+	}
+	path := filepath.Join(root, "eradication", "cases", operation.CaseID+".json")
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		if operation.PreviousHash != "" {
+			return "conflict", "previous case snapshot disappeared before commit"
+		}
+		return "not_observed", "final case snapshot is absent"
+	}
+	if err != nil || !info.Mode().IsRegular() {
+		return "conflict", fmt.Sprintf("final case snapshot cannot be read: %v", err)
+	}
+	hash, err := fileSHA256(path)
+	if err != nil {
+		return "conflict", fmt.Sprintf("final case snapshot cannot be hashed: %v", err)
+	}
+	if operation.PreviousHash != "" && operation.PreviousHash == operation.ExpectedHash && hash == operation.ExpectedHash {
+		return "manual_review", "new and previous case snapshots have identical bytes"
+	}
+	if operation.PreviousHash != "" && hash == operation.PreviousHash {
+		return "not_observed", "final case snapshot still matches the previous committed state"
+	}
+	if hash != operation.ExpectedHash {
+		return "conflict", fmt.Sprintf("final case snapshot differs from intent: %v", err)
+	}
+	return "observed_uncommitted", "final case snapshot matches intent but journal result is absent"
 }
 
 func inspectPersistenceRemoval(root string, operation OperationEntry) (string, string) {

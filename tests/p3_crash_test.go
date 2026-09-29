@@ -42,7 +42,10 @@ func TestJournalCrashChild(t *testing.T) {
 	path := filepath.Join(appData, "Bad", "sample.exe")
 	fileID, err := eradication.FileID(path)
 	if err != nil {
-		t.Fatal(err)
+		fileID = os.Getenv("BLOCK_ADS_CRASH_FILE_ID")
+		if fileID == "" {
+			t.Fatal(err)
+		}
 	}
 	manager := eradication.NewManager(root, 1, 1)
 	manager.OnOperation = observer
@@ -272,6 +275,177 @@ func TestCrashAfterResultBeforeCaseCommit(t *testing.T) {
 			t.Fatalf("restore target missing after committed restore: %v", err)
 		}
 	})
+}
+
+func TestCrashAtCaseCommitBoundaries(t *testing.T) {
+	for _, tc := range []struct {
+		stage, disposition string
+		casePresent        bool
+	}{
+		{"after_intent", "not_observed", false},
+		{"after_action", "observed_uncommitted", true},
+		{"after_result", "", true},
+	} {
+		t.Run(tc.stage, func(t *testing.T) {
+			root := testRoot(t)
+			path := filepath.Join(root, "AppData", "Roaming", "Bad", "sample.exe")
+			if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte("controlled artifact"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			runCrashChild(t, root, "case_commit", tc.stage, "")
+			cases := readOperations(t, root)
+			var commit eradication.OperationEntry
+			for _, entry := range cases {
+				if entry.Action == "case_commit" && entry.Phase == "intent" {
+					commit = entry
+				}
+			}
+			if commit.ID == "" || commit.ExpectedHash == "" || commit.RelatedPath != path {
+				t.Fatalf("case commit intent incomplete: %+v", commit)
+			}
+			_, err := os.Stat(filepath.Join(root, "eradication", "cases", commit.CaseID+".json"))
+			if tc.casePresent && err != nil || !tc.casePresent && !os.IsNotExist(err) {
+				t.Fatalf("final case presence after %s: %v", tc.stage, err)
+			}
+			findings, err := eradication.InspectRecovery(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.stage == "after_result" {
+				if len(findings) != 0 {
+					t.Fatalf("committed case has recovery finding: %+v", findings)
+				}
+			} else if len(findings) != 1 || findings[0].Operation.Action != "case_commit" || findings[0].Disposition != tc.disposition {
+				t.Fatalf("case commit crash misclassified: %+v", findings)
+			}
+		})
+	}
+}
+
+func TestCrashAtRestoreCaseCommitBoundaries(t *testing.T) {
+	for _, tc := range []struct {
+		stage, disposition string
+	}{
+		{"after_intent", "not_observed"},
+		{"after_action", "observed_uncommitted"},
+		{"after_result", ""},
+	} {
+		t.Run(tc.stage, func(t *testing.T) {
+			root := testRoot(t)
+			appData := filepath.Join(root, "AppData", "Roaming")
+			t.Setenv("APPDATA", appData)
+			t.Setenv("USERPROFILE", root)
+			path := filepath.Join(appData, "Bad", "sample.exe")
+			if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte("controlled artifact"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			fileID, err := eradication.FileID(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			manager := eradication.NewManager(root, 1, 1)
+			manager.Submit(eradication.HitEvent{ID: "restore-case-crash", PID: 0xfffffffe, CreatedLow: 1, Image: path, FileID: fileID, RuleKind: "folder", Rule: "Bad"})
+			manager.Close()
+			cases := readCases(t, root)
+			if len(cases) != 1 || cases[0].Artifacts[0].Status != "quarantined" {
+				t.Fatalf("quarantine precondition failed: %+v", cases)
+			}
+			runCrashChild(t, root, "case_commit", tc.stage, cases[0].ID)
+			var commit eradication.OperationEntry
+			for _, entry := range readOperations(t, root) {
+				if entry.Action == "case_commit" && entry.Phase == "intent" && entry.PreviousHash != "" {
+					commit = entry
+				}
+			}
+			if commit.ID == "" || commit.ExpectedHash == "" {
+				t.Fatalf("restore case commit intent incomplete: %+v", commit)
+			}
+			findings, err := eradication.InspectRecovery(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			found := false
+			for _, finding := range findings {
+				if finding.Operation.ID == commit.ID && finding.Disposition == tc.disposition {
+					found = true
+				}
+			}
+			if tc.stage == "after_result" && found || tc.stage != "after_result" && !found {
+				t.Fatalf("restore case commit crash misclassified: %+v", findings)
+			}
+		})
+	}
+}
+
+func TestCrashAtSharedReferenceBoundaries(t *testing.T) {
+	for _, tc := range []struct {
+		action, stage, disposition string
+	}{
+		{"link_reference", "after_intent", "not_observed"},
+		{"link_reference", "after_action", "observed_uncommitted"},
+		{"link_reference", "after_result", "manual_review"},
+		{"release_reference", "after_intent", "not_observed"},
+		{"release_reference", "after_action", "observed_uncommitted"},
+		{"release_reference", "after_result", "manual_review"},
+	} {
+		t.Run(tc.action+"/"+tc.stage, func(t *testing.T) {
+			root := testRoot(t)
+			appData := filepath.Join(root, "AppData", "Roaming")
+			t.Setenv("APPDATA", appData)
+			t.Setenv("USERPROFILE", root)
+			path := filepath.Join(appData, "Bad", "sample.exe")
+			if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte("controlled artifact"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			fileID, err := eradication.FileID(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			owner := eradication.NewManager(root, 1, 1)
+			owner.Submit(eradication.HitEvent{ID: "shared-owner", PID: 0xfffffffe, CreatedLow: 1, Image: path, FileID: fileID, RuleKind: "folder", Rule: "Bad"})
+			owner.Close()
+			if tc.action == "release_reference" {
+				linked := eradication.NewManager(root, 1, 1)
+				linked.Submit(eradication.HitEvent{ID: "shared-linked", PID: 0xfffffffd, CreatedLow: 2, Image: path, FileID: fileID, RuleKind: "folder", Rule: "Bad"})
+				linked.Close()
+				var linkedID string
+				for _, c := range readCases(t, root) {
+					if c.Hit.ID == "shared-linked" {
+						linkedID = c.ID
+					}
+				}
+				if linkedID == "" {
+					t.Fatal("linked case missing before release crash")
+				}
+				runCrashChild(t, root, tc.action, tc.stage, linkedID)
+			} else {
+				t.Setenv("BLOCK_ADS_CRASH_FILE_ID", fileID)
+				runCrashChild(t, root, tc.action, tc.stage, "")
+			}
+			findings, err := eradication.InspectRecovery(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			found := false
+			for _, finding := range findings {
+				if finding.Operation.Action == tc.action && finding.Operation.Target == path && finding.Disposition == tc.disposition {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("shared reference crash misclassified: %+v", findings)
+			}
+		})
+	}
 }
 
 func TestCrashAtStartupRemovalBoundaries(t *testing.T) {

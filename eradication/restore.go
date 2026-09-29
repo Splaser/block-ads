@@ -53,14 +53,10 @@ func RestoreCaseWithObserver(root, id string, observer OperationObserver) error 
 		}
 	}
 	if linked {
-		if err := releaseLinkedCase(root, &c); err != nil {
+		if err := releaseLinkedCase(root, &c, observer); err != nil {
 			return err
 		}
-		b, err := json.MarshalIndent(c, "", "  ")
-		if err != nil {
-			return err
-		}
-		return atomicWrite(casePath, b)
+		return commitCase(root, c, observer)
 	}
 	for _, a := range c.Artifacts {
 		if a.Status == "quarantined" {
@@ -124,9 +120,7 @@ func RestoreCaseWithObserver(root, id string, observer OperationObserver) error 
 	} else {
 		c.Status = "partial_restore"
 	}
-	if b, err := json.MarshalIndent(c, "", "  "); err != nil {
-		failures = append(failures, err)
-	} else if err := atomicWrite(casePath, b); err != nil {
+	if err := commitCase(root, c, observer); err != nil {
 		failures = append(failures, err)
 	}
 	return errors.Join(failures...)
