@@ -31,7 +31,7 @@ func InspectRecovery(root string) ([]RecoveryFinding, error) {
 	for _, operation := range unfinished {
 		finding := RecoveryFinding{Operation: operation, Disposition: "manual_review", Evidence: "external state has not been verified"}
 		switch operation.Action {
-		case "delete_original", "restore_file":
+		case "delete_original", "delete_retry", "restore_file":
 			finding.Disposition, finding.Evidence = inspectFileOperation(root, operation)
 		case "quarantine_copy", "quarantine_hash_verify", "quarantine_publish":
 			finding.Disposition, finding.Evidence = inspectQuarantinePreparation(root, operation)
@@ -63,6 +63,62 @@ func InspectRecovery(root string) ([]RecoveryFinding, error) {
 		return nil, err
 	}
 	findings = append(findings, copyFindings...)
+	rebootFindings, err := inspectPendingRebootCases(root)
+	if err != nil {
+		return nil, err
+	}
+	findings = append(findings, rebootFindings...)
+	return findings, nil
+}
+
+func inspectPendingRebootCases(root string) ([]RecoveryFinding, error) {
+	dir := filepath.Join(root, "eradication", "cases")
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	findings := []RecoveryFinding{}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") || strings.HasSuffix(entry.Name(), "-plan.json") {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(dir, entry.Name()))
+		if err != nil {
+			return nil, err
+		}
+		var c Case
+		if err := json.Unmarshal(b, &c); err != nil || c.ID+".json" != entry.Name() {
+			return nil, fmt.Errorf("invalid pending reboot case %s: %v", entry.Name(), err)
+		}
+		for _, a := range c.Artifacts {
+			if a.Status != "pending_reboot" {
+				continue
+			}
+			operation := OperationEntry{CaseID: c.ID, ArtifactID: ArtifactID(a.Path, a.FileID, a.SHA256),
+				Action: "pending_reboot_verify", Target: a.Path, ExpectedHash: a.SHA256,
+				ExpectedFileID: a.FileID, QuarantinePath: a.QuarantinePath}
+			disposition, evidence := "manual_review", "original is absent; reboot deletion and persistence require verification"
+			if info, statErr := os.Lstat(a.Path); statErr == nil {
+				if !info.Mode().IsRegular() {
+					disposition, evidence = "conflict", "original path is no longer a regular file"
+				} else {
+					id, idErr := FileID(a.Path)
+					hash, hashErr := fileSHA256(a.Path)
+					if idErr == nil && hashErr == nil && id == a.FileID && hash == a.SHA256 {
+						disposition, evidence = "pending_reboot", "original still matches the scheduled file; deletion has not been verified"
+					} else {
+						disposition, evidence = "conflict", "original path now has a different identity or hash"
+					}
+				}
+			} else if !errors.Is(statErr, os.ErrNotExist) {
+				disposition, evidence = "conflict", "original path cannot be checked: "+statErr.Error()
+			}
+			findings = append(findings, RecoveryFinding{Operation: operation, Disposition: disposition, Evidence: evidence})
+		}
+	}
 	return findings, nil
 }
 
@@ -465,7 +521,7 @@ func inspectFileOperation(root string, operation OperationEntry) (string, string
 	}
 	info, err := os.Lstat(operation.Target)
 	if errors.Is(err, os.ErrNotExist) {
-		if operation.Action == "delete_original" {
+		if operation.Action == "delete_original" || operation.Action == "delete_retry" {
 			return "observed_uncommitted", "original is absent and quarantine hash matches; ownership and case still need review"
 		}
 		return "not_observed", "restore target is absent and quarantine hash matches"

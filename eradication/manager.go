@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -87,19 +88,20 @@ type Case struct {
 }
 
 type Manager struct {
-	root            string
-	remediateMu     sync.Mutex
-	queueMu         sync.Mutex
-	queueReady      *sync.Cond
-	pending         []HitEvent
-	seenEvents      map[string]struct{}
-	closed          bool
-	workers         sync.WaitGroup
-	closeOnce       sync.Once
-	OnContainment   func(HitEvent, bool, error)
-	OnOperation     OperationObserver
-	recoveryBlocked map[string]OperationEntry
-	recoveryReadErr error
+	root                   string
+	remediateMu            sync.Mutex
+	queueMu                sync.Mutex
+	queueReady             *sync.Cond
+	pending                []HitEvent
+	seenEvents             map[string]struct{}
+	closed                 bool
+	workers                sync.WaitGroup
+	closeOnce              sync.Once
+	OnContainment          func(HitEvent, bool, error)
+	OnOperation            OperationObserver
+	ScheduleDeleteAtReboot func(string) error
+	recoveryBlocked        map[string]OperationEntry
+	recoveryReadErr        error
 }
 
 func NewManager(root string, queueSize, workerCount int) *Manager {
@@ -109,7 +111,7 @@ func NewManager(root string, queueSize, workerCount int) *Manager {
 	if workerCount < 1 {
 		workerCount = 2
 	}
-	m := &Manager{root: root, pending: make([]HitEvent, 0, queueSize), seenEvents: map[string]struct{}{}}
+	m := &Manager{root: root, pending: make([]HitEvent, 0, queueSize), seenEvents: map[string]struct{}{}, ScheduleDeleteAtReboot: scheduleDeleteAtReboot}
 	m.recoveryBlocked = map[string]OperationEntry{}
 	if findings, err := InspectRecovery(root); err != nil {
 		m.recoveryReadErr = err
@@ -117,7 +119,7 @@ func NewManager(root string, queueSize, workerCount int) *Manager {
 		for _, finding := range findings {
 			operation := finding.Operation
 			path := operation.RelatedPath
-			if path == "" && (operation.Action == "delete_original" || operation.Action == "record_ownership" || operation.Action == "restore_file" || operation.Action == "restore_ownership" || operation.Action == "case_commit") {
+			if path == "" && (operation.Action == "delete_original" || operation.Action == "enumerate_lockers" || operation.Action == "delete_retry" || operation.Action == "schedule_reboot_delete" || operation.Action == "pending_reboot_verify" || operation.Action == "record_ownership" || operation.Action == "restore_file" || operation.Action == "restore_ownership" || operation.Action == "case_commit") {
 				path = operation.Target
 			}
 			if path != "" {
@@ -301,12 +303,19 @@ func (m *Manager) handle(hit HitEvent) {
 			continue
 		}
 		path, err := m.quarantine(c.ID, hit, *a)
+		if path != "" {
+			a.QuarantinePath = path
+		}
 		if err != nil {
-			a.Status = "pending"
+			var reboot *PendingRebootError
+			if errors.As(err, &reboot) {
+				a.Status = "pending_reboot"
+			} else {
+				a.Status = "pending"
+			}
 			a.Error = err.Error()
 			continue
 		}
-		a.QuarantinePath = path
 		a.Status = "quarantined"
 		if err := runJournaled(m.root, OperationEntry{
 			CaseID: c.ID, ArtifactID: ArtifactID(a.Path, a.FileID, a.SHA256), Action: "record_ownership", Target: a.Path,
@@ -366,6 +375,9 @@ func caseStatus(c Case) string {
 	// observation (including a reboot check) must explicitly mark completion.
 	status := "pending_verification"
 	for _, a := range c.Artifacts {
+		if a.Status == "pending_reboot" {
+			return "pending_reboot"
+		}
 		if a.Status == "pending" || a.Status == "failed" {
 			return "pending"
 		}

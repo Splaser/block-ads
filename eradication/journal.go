@@ -20,6 +20,9 @@ type OperationEntry struct {
 	ID                  string    `json:"id"`
 	CaseID              string    `json:"case_id"`
 	OwnerCaseID         string    `json:"owner_case_id,omitempty"`
+	ProcessID           uint32    `json:"process_id,omitempty"`
+	CreatedHigh         uint32    `json:"created_high,omitempty"`
+	CreatedLow          uint32    `json:"created_low,omitempty"`
 	ArtifactID          string    `json:"artifact_id,omitempty"`
 	PersistenceID       string    `json:"persistence_id,omitempty"`
 	PersistenceType     string    `json:"persistence_type,omitempty"`

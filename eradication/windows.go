@@ -298,6 +298,44 @@ type quarantineMetadata struct {
 	Quarantined  time.Time `json:"quarantined_at"`
 }
 
+// PendingRebootError means a delete was scheduled, not completed or verified.
+type PendingRebootError struct {
+	Path   string
+	Detail string
+}
+
+func (e *PendingRebootError) Error() string {
+	message := "delete scheduled for reboot; original remains until a post-reboot check: " + e.Path
+	if e.Detail != "" {
+		message += "; " + e.Detail
+	}
+	return message
+}
+
+func sharingViolation(err error) bool {
+	return errors.Is(err, windows.ERROR_SHARING_VIOLATION) || errors.Is(err, windows.ERROR_LOCK_VIOLATION)
+}
+
+func removeVerifiedArtifact(path string, original os.FileInfo, a Artifact) error {
+	current, err := os.Lstat(path)
+	if err != nil || !os.SameFile(original, current) {
+		return fmt.Errorf("source changed before removal: %v", err)
+	}
+	if id, err := FileID(path); err != nil || id != a.FileID {
+		return fmt.Errorf("source identity changed before removal: %v", err)
+	}
+	if hash, err := fileSHA256(path); err != nil || hash != a.SHA256 {
+		return fmt.Errorf("source hash changed before removal: %v", err)
+	}
+	if err := os.Remove(path); err != nil {
+		return err
+	}
+	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("source still present after removal: %v", err)
+	}
+	return nil
+}
+
 func (m *Manager) quarantine(caseID string, hit HitEvent, a Artifact) (string, error) {
 	if a.SHA256 == "" || !inUserAppData(a.Path) {
 		return "", fmt.Errorf("artifact is outside verified user AppData or lacks hash")
@@ -417,15 +455,75 @@ func (m *Manager) quarantine(caseID string, hit HitEvent, a Artifact) (string, e
 		CaseID: caseID, ArtifactID: ArtifactID(a.Path, a.FileID, a.SHA256), Action: "delete_original", Target: a.Path,
 		Precondition: precondition, ExpectedHash: a.SHA256, ExpectedFileID: a.FileID, QuarantinePath: target,
 	}, m.OnOperation, func() error {
-		if err := os.Remove(a.Path); err != nil {
-			return err
-		}
-		if _, err := os.Lstat(a.Path); !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("source still present after removal: %v", err)
-		}
-		return nil
+		return removeVerifiedArtifact(a.Path, fi, a)
 	}); err != nil {
-		return "", err
+		if !sharingViolation(err) {
+			return target, err
+		}
+		var lockers []lockerProcess
+		listErr := runJournaled(m.root, OperationEntry{
+			CaseID: caseID, ArtifactID: ArtifactID(a.Path, a.FileID, a.SHA256), Action: "enumerate_lockers",
+			Target: a.Path, ExpectedHash: a.SHA256, ExpectedFileID: a.FileID,
+			Precondition: "immediate deletion failed with a sharing violation",
+		}, m.OnOperation, func() error {
+			var err error
+			lockers, err = enumerateLockers(a.Path)
+			return err
+		})
+		var lockerErrors []error
+		for _, locker := range lockers {
+			h, authErr := openAuthorizedLocker(locker, hit)
+			if authErr != nil {
+				continue
+			}
+			killEntry := OperationEntry{
+				CaseID: caseID, ArtifactID: ArtifactID(a.Path, a.FileID, a.SHA256), Action: "terminate_locker",
+				Target: hit.Image, RelatedPath: a.Path, ProcessID: locker.PID,
+				CreatedHigh: locker.Created.HighDateTime, CreatedLow: locker.Created.LowDateTime,
+				ExpectedHash: a.SHA256, ExpectedFileID: a.FileID, QuarantinePath: target,
+				Precondition: "locker creation time, image path and file identity verified",
+			}
+			killErr := runJournaled(m.root, killEntry, m.OnOperation, func() error { return terminateVerifiedLocker(h) })
+			windows.CloseHandle(h)
+			if killErr != nil {
+				lockerErrors = append(lockerErrors, fmt.Errorf("verified locker PID %d: %w", locker.PID, killErr))
+			}
+		}
+		if retryErr := runJournaled(m.root, OperationEntry{
+			CaseID: caseID, ArtifactID: ArtifactID(a.Path, a.FileID, a.SHA256), Action: "delete_retry", Target: a.Path,
+			Precondition: "source identity unchanged after locker enumeration", ExpectedHash: a.SHA256,
+			ExpectedFileID: a.FileID, QuarantinePath: target,
+		}, m.OnOperation, func() error { return removeVerifiedArtifact(a.Path, fi, a) }); retryErr == nil {
+			return target, nil
+		} else if !sharingViolation(retryErr) {
+			return target, retryErr
+		}
+		if m.ScheduleDeleteAtReboot == nil {
+			return target, fmt.Errorf("reboot deletion unavailable after sharing violation; locker enumeration: %v", listErr)
+		}
+		if err := runJournaled(m.root, OperationEntry{
+			CaseID: caseID, ArtifactID: ArtifactID(a.Path, a.FileID, a.SHA256), Action: "schedule_reboot_delete", Target: a.Path,
+			Precondition: "source identity and hash unchanged; immediate deletion blocked by sharing violation",
+			ExpectedHash: a.SHA256, ExpectedFileID: a.FileID, QuarantinePath: target,
+		}, m.OnOperation, func() error {
+			if current, checkErr := os.Lstat(a.Path); checkErr != nil || !os.SameFile(fi, current) {
+				return fmt.Errorf("source changed before reboot scheduling: %v", checkErr)
+			}
+			if id, checkErr := FileID(a.Path); checkErr != nil || id != a.FileID {
+				return fmt.Errorf("source identity changed before reboot scheduling: %v", checkErr)
+			}
+			if hash, checkErr := fileSHA256(a.Path); checkErr != nil || hash != a.SHA256 {
+				return fmt.Errorf("source hash changed before reboot scheduling: %v", checkErr)
+			}
+			return m.ScheduleDeleteAtReboot(a.Path)
+		}); err != nil {
+			return target, fmt.Errorf("reboot deletion was not scheduled: %w; locker enumeration: %v", err, listErr)
+		}
+		detail := ""
+		if listErr != nil || len(lockerErrors) != 0 {
+			detail = fmt.Sprintf("locker enumeration=%v; termination=%v", listErr, errors.Join(lockerErrors...))
+		}
+		return target, &PendingRebootError{Path: a.Path, Detail: detail}
 	}
 	return target, nil
 }

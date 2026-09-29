@@ -337,7 +337,7 @@ func TestFileIdentityReplacementIsReview(t *testing.T) {
 	}
 }
 
-func TestLockedArtifactStaysPending(t *testing.T) {
+func TestLockedArtifactSchedulesPendingReboot(t *testing.T) {
 	root := testRoot(t)
 	appData := filepath.Join(root, "AppData", "Roaming")
 	t.Setenv("APPDATA", appData)
@@ -362,23 +362,49 @@ func TestLockedArtifactStaysPending(t *testing.T) {
 	}
 	defer windows.CloseHandle(h)
 	manager := eradication.NewManager(root, 1, 1)
+	scheduled := ""
+	manager.ScheduleDeleteAtReboot = func(candidate string) error {
+		scheduled = candidate
+		return nil
+	}
 	manager.Submit(eradication.HitEvent{ID: "locked", PID: 0xfffffffe, CreatedLow: 1, Image: path, FileID: id, RuleKind: "folder", Rule: "Bad"})
 	manager.Close()
 	cases := readCases(t, root)
-	if len(cases) != 1 || cases[0].Status != "pending" || len(cases[0].Artifacts) == 0 || cases[0].Artifacts[0].Status != "pending" {
+	if len(cases) != 1 || cases[0].Status != "pending_reboot" || len(cases[0].Artifacts) == 0 || cases[0].Artifacts[0].Status != "pending_reboot" || scheduled != path {
 		t.Fatalf("locked file counted as success: %+v", cases)
+	}
+	if err := eradication.RestoreCase(root, cases[0].ID); err == nil {
+		t.Fatal("scheduled reboot deletion was incorrectly restored without cancellation")
 	}
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("locked original missing: %v", err)
 	}
-	foundFailure := false
+	foundFailure, foundSchedule := false, false
 	for _, operation := range readOperations(t, root) {
 		if operation.Action == "delete_original" && operation.Phase == "failed" && operation.Error != "" {
 			foundFailure = true
 		}
+		if operation.Action == "schedule_reboot_delete" && operation.Phase == "committed" {
+			foundSchedule = true
+		}
 	}
-	if !foundFailure {
-		t.Fatal("sharing violation was not recorded in the operation journal")
+	if !foundFailure || !foundSchedule {
+		t.Fatal("sharing violation or reboot scheduling was not recorded in the operation journal")
+	}
+	findings, err := eradication.InspectRecovery(root)
+	if err != nil || len(findings) != 1 || findings[0].Disposition != "pending_reboot" {
+		t.Fatalf("scheduled deletion was not left pending: %+v, %v", findings, err)
+	}
+	secondSchedule := false
+	next := eradication.NewManager(root, 1, 1)
+	next.ScheduleDeleteAtReboot = func(string) error {
+		secondSchedule = true
+		return nil
+	}
+	next.Submit(eradication.HitEvent{ID: "locked-again", PID: 0xfffffffe, CreatedLow: 2, Image: path, FileID: id, RuleKind: "folder", Rule: "Bad"})
+	next.Close()
+	if secondSchedule {
+		t.Fatal("pending reboot case scheduled the same path again")
 	}
 }
 

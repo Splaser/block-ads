@@ -46,6 +46,14 @@ func RestoreCaseWithObserver(root, id string, observer OperationObserver) error 
 	if c.Status == "released" || c.Status == "restored" {
 		return nil
 	}
+	for _, artifact := range c.Artifacts {
+		if artifact.Status == "pending_reboot" {
+			return fmt.Errorf("case %s has a reboot deletion request; restore requires cancellation and post-reboot verification", id)
+		}
+		if artifact.Status == "pending" || artifact.Status == "failed" {
+			return fmt.Errorf("case %s still has an unresolved artifact at %s", id, artifact.Path)
+		}
+	}
 	linked := false
 	for _, a := range c.Artifacts {
 		if a.Status == "linked" {

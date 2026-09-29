@@ -13,8 +13,10 @@
 
 每次任务在 `eradication/cases/<id>.json` 留下结果。处置前先保存 `<id>-plan.json`；计划任务 XML、快捷方式及服务注册表项另存于 `eradication/backups/<id>/`。快捷方式的 target、arguments、working directory 分开记录，并保留原始 `.lnk` 文件。隔离失败或即时校验失败记为 `pending`；即时处置成功记为 `pending_verification`，直到完成持续观察及重启后验证才能称为根除完成。同一管理器内的处置串行执行；隔离后的文件有稳定 artifact ID 与独立归属记录，多个 PID 命中同一文件时，各 case 引用该记录，实际文件只隔离一次。
 
+原件删除遇到共享冲突时，先用 Windows Restart Manager 枚举占用者。只有占用进程的创建时间、镜像路径与文件 identity 都对应命中的 EXE，才会终止并确认退出；随后重试删除。其他占用进程不会被终止。仍被占用时尝试登记 `MoveFileEx(MOVEFILE_DELAY_UNTIL_REBOOT)`，case 和 artifact 保持 `pending_reboot`，原件仍存在，不能计为已隔离。登记通常需要管理员或 LocalSystem 权限；失败则保持 `pending`。重启后的实际删除尚需复查；登记只证明请求已写入系统，且路径在重启前被替换时有误删风险。
+
 ## 恢复
 
 使用 `block-ads.exe --restore-case <id>` 从隔离区恢复 EXE/DLL，并恢复可自动重建的 Run 项、Startup 快捷方式和计划任务。共享 artifact 的关联 case 先执行该命令释放引用，owner case 在引用释放后执行实际恢复；已有不同内容的原路径不会被覆盖。服务备份保留为 `.reg` 供人工检查，当前没有自动服务处置，也无需自动恢复服务。
 
-此版本不会自动接管文件所有权、更改 ACL 或安排重启后删除。普通隔离失败会在 case 结果中保留失败原因。
+待重启删除的 case 暂不允许恢复，因为恢复前必须先安全取消系统中尚未执行的删除请求。此版本不会自动接管文件所有权或更改 ACL。其他隔离失败会在 case 结果中保留原因。
