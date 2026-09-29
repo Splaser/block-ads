@@ -328,10 +328,22 @@ func (m *Manager) handle(hit HitEvent) {
 		}
 		item := &c.Persistence[i]
 		precondition := fmt.Sprintf("type=%s location=%s target=%s", item.Type, item.Location, item.Target)
-		if err := runJournaled(m.root, OperationEntry{
+		entry := OperationEntry{
 			CaseID: c.ID, PersistenceID: PersistenceID(item.Type, item.Location, item.Name),
 			Action: "remove_persistence", Target: item.Name, RelatedPath: item.Target, Precondition: precondition,
-		}, m.OnOperation, func() error {
+			PersistenceType: item.Type, PersistenceLocation: item.Location, BackupPath: item.BackupPath,
+			ExpectedValue: item.Evidence, ValueType: item.ValueType,
+		}
+		if item.Type == "startup_link" || item.Type == "task" {
+			hash, err := fileSHA256(item.BackupPath)
+			if err != nil {
+				item.Status = "failed"
+				item.Error = "persistence backup changed before deletion: " + err.Error()
+				continue
+			}
+			entry.ExpectedHash = hash
+		}
+		if err := runJournaled(m.root, entry, m.OnOperation, func() error {
 			return removePersistence(item)
 		}); err != nil {
 			c.Persistence[i].Status = "failed"

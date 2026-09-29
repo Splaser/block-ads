@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"golang.org/x/sys/windows/registry"
 )
 
 // RecoveryFinding is a read-only interpretation of an operation whose result
@@ -31,8 +33,12 @@ func InspectRecovery(root string) ([]RecoveryFinding, error) {
 		switch operation.Action {
 		case "delete_original", "restore_file":
 			finding.Disposition, finding.Evidence = inspectFileOperation(root, operation)
+		case "quarantine_copy", "quarantine_hash_verify", "quarantine_publish":
+			finding.Disposition, finding.Evidence = inspectQuarantinePreparation(root, operation)
 		case "record_ownership", "restore_ownership":
 			finding.Disposition, finding.Evidence = inspectOwnershipOperation(root, operation)
+		case "remove_persistence":
+			finding.Disposition, finding.Evidence = inspectPersistenceRemoval(root, operation)
 		}
 		findings = append(findings, finding)
 	}
@@ -42,6 +48,83 @@ func InspectRecovery(root string) ([]RecoveryFinding, error) {
 	}
 	findings = append(findings, caseFindings...)
 	return findings, nil
+}
+
+func inspectPersistenceRemoval(root string, operation OperationEntry) (string, string) {
+	if operation.PersistenceID != PersistenceID(operation.PersistenceType, operation.PersistenceLocation, operation.Target) || operation.RelatedPath == "" {
+		return "manual_review", "intent lacks persistence identity or artifact association"
+	}
+	switch operation.PersistenceType {
+	case "startup_link", "task":
+		if operation.ExpectedHash == "" || !backupWithin(root, operation.CaseID, operation.BackupPath) {
+			return "manual_review", "persistence backup is missing or outside the case"
+		}
+		if hash, err := fileSHA256(operation.BackupPath); err != nil || hash != operation.ExpectedHash {
+			return "conflict", fmt.Sprintf("persistence backup hash differs from intent: %v", err)
+		}
+		info, err := os.Lstat(operation.PersistenceLocation)
+		if errors.Is(err, os.ErrNotExist) {
+			return "observed_uncommitted", "persistence entry is absent but deletion result was not committed"
+		}
+		if err != nil || !info.Mode().IsRegular() {
+			return "conflict", fmt.Sprintf("persistence entry is unreadable or not regular: %v", err)
+		}
+		if hash, err := fileSHA256(operation.PersistenceLocation); err != nil || hash != operation.ExpectedHash {
+			return "conflict", fmt.Sprintf("persistence entry differs from its backup: %v", err)
+		}
+		return "not_observed", "persistence entry still matches its verified backup"
+	case "registry_run":
+		for _, loc := range runLocations {
+			if locationName(loc) != operation.PersistenceLocation {
+				continue
+			}
+			key, err := registry.OpenKey(loc.root, loc.name, registry.QUERY_VALUE|loc.view)
+			if errors.Is(err, registry.ErrNotExist) {
+				return "observed_uncommitted", "Run location is absent"
+			}
+			if err != nil {
+				return "conflict", fmt.Sprintf("Run location cannot be read: %v", err)
+			}
+			value, valueType, err := key.GetStringValue(operation.Target)
+			key.Close()
+			if errors.Is(err, registry.ErrNotExist) {
+				return "observed_uncommitted", "Run value is absent but deletion result was not committed"
+			}
+			if err != nil || value != operation.ExpectedValue || valueType != operation.ValueType {
+				return "conflict", fmt.Sprintf("Run value differs from intent: %v", err)
+			}
+			return "not_observed", "Run value still matches the intent"
+		}
+		return "manual_review", "Run location is not recognized"
+	}
+	return "manual_review", "persistence type has no read-only recovery check"
+}
+
+func inspectQuarantinePreparation(root string, operation OperationEntry) (string, string) {
+	if operation.ExpectedHash == "" || operation.ExpectedFileID == "" || operation.QuarantinePath == "" || operation.ArtifactID != ArtifactID(operation.Target, operation.ExpectedFileID, operation.ExpectedHash) {
+		return "manual_review", "intent lacks a complete artifact identity"
+	}
+	if !beneath(operation.QuarantinePath, filepath.Join(root, "eradication", "quarantine")) {
+		return "conflict", "quarantine path is outside the case store"
+	}
+	info, err := os.Lstat(operation.QuarantinePath)
+	if errors.Is(err, os.ErrNotExist) {
+		if operation.Action == "quarantine_hash_verify" {
+			return "conflict", "copy disappeared before hash verification was committed"
+		}
+		return "not_observed", "quarantine copy or published target is absent"
+	}
+	if err != nil || !info.Mode().IsRegular() {
+		return "conflict", fmt.Sprintf("quarantine path is unreadable or not regular: %v", err)
+	}
+	hash, err := fileSHA256(operation.QuarantinePath)
+	if err != nil || hash != operation.ExpectedHash {
+		return "conflict", fmt.Sprintf("quarantine bytes differ from intent: %v", err)
+	}
+	if operation.Action == "quarantine_hash_verify" {
+		return "manual_review", "copy hash matches, but the verification result was not committed"
+	}
+	return "observed_uncommitted", "quarantine bytes match, but the operation result was not committed"
 }
 
 func inspectCaseCommitGaps(root string, existing []RecoveryFinding) ([]RecoveryFinding, error) {

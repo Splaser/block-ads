@@ -315,33 +315,49 @@ func (m *Manager) quarantine(caseID string, hit HitEvent, a Artifact) (string, e
 	}
 	ext := strings.ToLower(filepath.Ext(a.Path))
 	target := filepath.Join(dir, a.SHA256+ext)
-	tmp, err := os.CreateTemp(dir, ".artifact-*")
-	if err != nil {
-		return "", err
-	}
-	tmpPath := tmp.Name()
+	tmpPath := filepath.Join(dir, ".artifact-"+newCaseID(HitEvent{}))
 	defer os.Remove(tmpPath)
-	src, err := os.Open(a.Path)
-	if err != nil {
-		tmp.Close()
+	artifactID := ArtifactID(a.Path, a.FileID, a.SHA256)
+	if err := runJournaled(m.root, OperationEntry{
+		CaseID: caseID, ArtifactID: artifactID, Action: "quarantine_copy", Target: a.Path, RelatedPath: a.Path,
+		ExpectedHash: a.SHA256, ExpectedFileID: a.FileID, QuarantinePath: tmpPath,
+		Precondition: "source file identity matched; temporary destination must be absent",
+	}, m.OnOperation, func() error {
+		tmp, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+		if err != nil {
+			return err
+		}
+		src, err := os.Open(a.Path)
+		if err != nil {
+			tmp.Close()
+			return err
+		}
+		_, copyErr := io.Copy(tmp, src)
+		src.Close()
+		if copyErr != nil {
+			tmp.Close()
+			return copyErr
+		}
+		if err := tmp.Sync(); err != nil {
+			tmp.Close()
+			return err
+		}
+		return tmp.Close()
+	}); err != nil {
 		return "", err
 	}
-	_, copyErr := io.Copy(tmp, src)
-	src.Close()
-	if copyErr != nil {
-		tmp.Close()
-		return "", copyErr
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
+	if err := runJournaled(m.root, OperationEntry{
+		CaseID: caseID, ArtifactID: artifactID, Action: "quarantine_hash_verify", Target: a.Path, RelatedPath: a.Path,
+		ExpectedHash: a.SHA256, ExpectedFileID: a.FileID, QuarantinePath: tmpPath,
+		Precondition: "temporary copy closed and synced",
+	}, m.OnOperation, func() error {
+		copyHash, err := fileSHA256(tmpPath)
+		if err != nil || copyHash != a.SHA256 {
+			return fmt.Errorf("quarantine copy hash mismatch: %v", err)
+		}
+		return nil
+	}); err != nil {
 		return "", err
-	}
-	if err := tmp.Close(); err != nil {
-		return "", err
-	}
-	copyHash, err := fileSHA256(tmpPath)
-	if err != nil || copyHash != a.SHA256 {
-		return "", fmt.Errorf("quarantine copy hash mismatch: %v", err)
 	}
 	if existingHash, err := fileSHA256(target); err == nil {
 		if existingHash != a.SHA256 {
@@ -351,7 +367,27 @@ func (m *Manager) quarantine(caseID string, hit HitEvent, a Artifact) (string, e
 			return "", fmt.Errorf("existing quarantine target is not a regular local file: %v", err)
 		}
 	} else if errors.Is(err, os.ErrNotExist) {
-		if err := os.Rename(tmpPath, target); err != nil {
+		if err := runJournaled(m.root, OperationEntry{
+			CaseID: caseID, ArtifactID: artifactID, Action: "quarantine_publish", Target: a.Path, RelatedPath: a.Path,
+			ExpectedHash: a.SHA256, ExpectedFileID: a.FileID, QuarantinePath: target,
+			Precondition: "temporary copy hash verified; published target was absent",
+		}, m.OnOperation, func() error {
+			source, err := windows.UTF16PtrFromString(tmpPath)
+			if err != nil {
+				return err
+			}
+			destination, err := windows.UTF16PtrFromString(target)
+			if err != nil {
+				return err
+			}
+			if err := windows.MoveFileEx(source, destination, windows.MOVEFILE_WRITE_THROUGH); err != nil {
+				return err
+			}
+			if hash, err := fileSHA256(target); err != nil || hash != a.SHA256 {
+				return fmt.Errorf("published quarantine hash mismatch: %v", err)
+			}
+			return nil
+		}); err != nil {
 			return "", err
 		}
 	} else {

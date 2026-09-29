@@ -17,20 +17,25 @@ import (
 // Intent is durable before the external change; result is a separate file so
 // an interrupted action remains visible after a crash.
 type OperationEntry struct {
-	ID             string    `json:"id"`
-	CaseID         string    `json:"case_id"`
-	ArtifactID     string    `json:"artifact_id,omitempty"`
-	PersistenceID  string    `json:"persistence_id,omitempty"`
-	ExpectedHash   string    `json:"expected_sha256,omitempty"`
-	ExpectedFileID string    `json:"expected_file_id,omitempty"`
-	QuarantinePath string    `json:"quarantine_path,omitempty"`
-	RelatedPath    string    `json:"related_path,omitempty"`
-	Action         string    `json:"action"`
-	Target         string    `json:"target"`
-	Precondition   string    `json:"precondition,omitempty"`
-	Phase          string    `json:"phase"`
-	Error          string    `json:"error,omitempty"`
-	At             time.Time `json:"at"`
+	ID                  string    `json:"id"`
+	CaseID              string    `json:"case_id"`
+	ArtifactID          string    `json:"artifact_id,omitempty"`
+	PersistenceID       string    `json:"persistence_id,omitempty"`
+	PersistenceType     string    `json:"persistence_type,omitempty"`
+	PersistenceLocation string    `json:"persistence_location,omitempty"`
+	BackupPath          string    `json:"backup_path,omitempty"`
+	ExpectedValue       string    `json:"expected_value,omitempty"`
+	ValueType           uint32    `json:"value_type,omitempty"`
+	ExpectedHash        string    `json:"expected_sha256,omitempty"`
+	ExpectedFileID      string    `json:"expected_file_id,omitempty"`
+	QuarantinePath      string    `json:"quarantine_path,omitempty"`
+	RelatedPath         string    `json:"related_path,omitempty"`
+	Action              string    `json:"action"`
+	Target              string    `json:"target"`
+	Precondition        string    `json:"precondition,omitempty"`
+	Phase               string    `json:"phase"`
+	Error               string    `json:"error,omitempty"`
+	At                  time.Time `json:"at"`
 }
 
 // OperationObserver receives a durable intent, a finished external action,

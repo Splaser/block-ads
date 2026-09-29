@@ -121,6 +121,48 @@ func TestCrashAtOriginalDeletionBoundaries(t *testing.T) {
 	}
 }
 
+func TestCrashAtQuarantinePreparationBoundaries(t *testing.T) {
+	for _, tc := range []struct {
+		action, stage, disposition string
+	}{
+		{"quarantine_copy", "after_intent", "not_observed"},
+		{"quarantine_copy", "after_action", "observed_uncommitted"},
+		{"quarantine_copy", "after_result", "manual_review"},
+		{"quarantine_hash_verify", "after_intent", "manual_review"},
+		{"quarantine_hash_verify", "after_action", "manual_review"},
+		{"quarantine_hash_verify", "after_result", "manual_review"},
+		{"quarantine_publish", "after_intent", "not_observed"},
+		{"quarantine_publish", "after_action", "observed_uncommitted"},
+		{"quarantine_publish", "after_result", "manual_review"},
+	} {
+		t.Run(tc.action+"/"+tc.stage, func(t *testing.T) {
+			root := testRoot(t)
+			path := filepath.Join(root, "AppData", "Roaming", "Bad", "sample.exe")
+			if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte("controlled artifact"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			runCrashChild(t, root, tc.action, tc.stage, "")
+			if _, err := os.Stat(path); err != nil {
+				t.Fatalf("preparation crash removed original: %v", err)
+			}
+			findings, err := eradication.InspectRecovery(root)
+			if err != nil || len(findings) != 1 || findings[0].Disposition != tc.disposition {
+				t.Fatalf("preparation crash misclassified: %+v, %v", findings, err)
+			}
+			if tc.stage == "after_result" {
+				if findings[0].Operation.Action != "case_commit" {
+					t.Fatalf("committed preparation did not expose missing case: %+v", findings)
+				}
+			} else if findings[0].Operation.Action != tc.action {
+				t.Fatalf("incomplete preparation action was hidden: %+v", findings)
+			}
+		})
+	}
+}
+
 func TestCrashAtRestoreFileBoundaries(t *testing.T) {
 	for _, tc := range []struct {
 		stage, disposition string
@@ -225,4 +267,62 @@ func TestCrashAfterResultBeforeCaseCommit(t *testing.T) {
 			t.Fatalf("restore target missing after committed restore: %v", err)
 		}
 	})
+}
+
+func TestCrashAtStartupRemovalBoundaries(t *testing.T) {
+	tool, err := exec.LookPath("powershell.exe")
+	if err != nil {
+		t.Skipf("Windows PowerShell unavailable: %v", err)
+	}
+	for _, tc := range []struct {
+		stage, disposition string
+		linkPresent        bool
+	}{
+		{"after_intent", "not_observed", true},
+		{"after_action", "observed_uncommitted", false},
+		{"after_result", "manual_review", false},
+	} {
+		t.Run(tc.stage, func(t *testing.T) {
+			root := testRoot(t)
+			appData := filepath.Join(root, "AppData", "Roaming")
+			path := filepath.Join(appData, "Bad", "sample.exe")
+			link := filepath.Join(appData, `Microsoft\Windows\Start Menu\Programs\Startup`, "sample.lnk")
+			for _, dir := range []string{filepath.Dir(path), filepath.Dir(link)} {
+				if err := os.MkdirAll(dir, 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.WriteFile(path, []byte("controlled artifact"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			script := `$w = New-Object -ComObject WScript.Shell; $l = $w.CreateShortcut($env:BLOCK_ADS_LINK); $l.TargetPath = $env:BLOCK_ADS_TARGET; $l.Arguments = '--update'; $l.WorkingDirectory = $env:BLOCK_ADS_WORKDIR; $l.Save()`
+			cmd := exec.Command(tool, "-NoProfile", "-NonInteractive", "-Command", script)
+			cmd.Env = append(os.Environ(), "BLOCK_ADS_LINK="+link, "BLOCK_ADS_TARGET="+path, "BLOCK_ADS_WORKDIR="+filepath.Dir(path))
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("create test shortcut: %v: %s", err, out)
+			}
+			runCrashChild(t, root, "remove_persistence", tc.stage, "")
+			_, err := os.Lstat(link)
+			if tc.linkPresent && err != nil || !tc.linkPresent && !os.IsNotExist(err) {
+				t.Fatalf("startup link presence after %s: %v", tc.stage, err)
+			}
+			findings, err := eradication.InspectRecovery(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			found := false
+			for _, finding := range findings {
+				if tc.stage == "after_result" {
+					if finding.Operation.Action == "case_commit" && finding.Disposition == tc.disposition {
+						found = true
+					}
+				} else if finding.Operation.Action == "remove_persistence" && finding.Disposition == tc.disposition && finding.Operation.RelatedPath == path && finding.Operation.ExpectedHash != "" {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("startup removal crash misclassified: %+v", findings)
+			}
+		})
+	}
 }
