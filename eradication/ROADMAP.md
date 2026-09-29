@@ -33,12 +33,12 @@
 
 ## 3. Crash semantics / Action Journal
 
-当前进度：`delete_original`、`record_ownership`、`remove_persistence`、`restore_file`、`restore_ownership` 和 `restore_persistence` 已按 intent 与独立结果文件记录操作 ID、case/artifact/持久化引用、动作、前置条件、结果、错误和时间。文件操作的 intent 另存预期哈希、文件 identity 和隔离路径。启动时只读核对未决操作，区分原动作未观察到、疑似已发生但未提交、现场冲突和需要人工复查；同一路径的新命中保留 case，暂停新的自动处置。当前不自动重试或回滚。隔离副本复制、哈希校验、共享引用更新和 case 状态提交还需纳入 journal。
+当前进度：`delete_original`、`record_ownership`、`remove_persistence`、`restore_file`、`restore_ownership` 和 `restore_persistence` 已按 intent 与独立结果文件记录操作 ID、case/artifact/持久化引用、动作、前置条件、结果、错误和时间。文件操作的 intent 另存预期哈希、文件 identity 和隔离路径。启动时只读核对未决操作、缺少最终 case 的 plan，以及已提交恢复动作与旧 case 状态的冲突；同一路径的新命中保留 case，暂停新的自动处置。隔离进程子进程测试已在 `delete_original` 和 `restore_file` 的 intent 后、外部动作后、结果落盘后注入崩溃并核对现场。当前不自动重试或回滚。隔离副本复制、哈希校验、共享引用更新和 case 状态提交还需纳入 journal。
 
 - [ ] 为每个 destructive step 定义 `落盘 intent → 执行动作 → 验证结果 → 落盘 committed state`；已覆盖原件删除、持久化删除和恢复的关键外部动作，剩余步骤待补；文件内容在发布前同步，JSON 用临时文件与原子替换写入。
 - [ ] 持久化按序操作日志，记录操作 ID、case/artifact 引用、动作、前置条件、结果、错误和时间。关键动作已记录，仍需覆盖 `quarantine_copy`、`hash_verify`、`remove_task=skipped` 等完整序列与严格顺序号。
-- [ ] 在复制、哈希校验、删除原件、清除持久化项、写入 committed state 之前和之后分别注入崩溃。
-- [ ] 启动时从 intent、journal、case、备份与隔离副本重建进度；目前已只读核对文件和归属记录、暂停同路径新的自动处置，仍需关联 case 与持久化备份，再决定安全继续、回滚或人工处理。
+- [ ] 在复制、哈希校验、删除原件、清除持久化项、写入 committed state 之前和之后分别注入崩溃。已覆盖原件删除与文件恢复的三个日志边界，复制、哈希和持久化项仍待注入。
+- [ ] 启动时从 intent、journal、case、备份与隔离副本重建进度；目前已只读核对文件、归属记录、缺失的最终 case 与滞后的恢复状态，暂停同路径新的自动处置，仍需关联持久化备份，再决定安全继续、回滚或人工处理。
 - [ ] 被占用文件保持 `pending`；将来若加入 reboot-delete，单独记录 `PendingReboot`，重启后验证前不能记为已删除。
 
 ## 4. Task / Service 失败与恢复

@@ -96,6 +96,7 @@ type Manager struct {
 	workers         sync.WaitGroup
 	closeOnce       sync.Once
 	OnContainment   func(HitEvent, bool, error)
+	OnOperation     OperationObserver
 	recoveryBlocked map[string]OperationEntry
 	recoveryReadErr error
 }
@@ -109,12 +110,13 @@ func NewManager(root string, queueSize, workerCount int) *Manager {
 	}
 	m := &Manager{root: root, pending: make([]HitEvent, 0, queueSize), seenEvents: map[string]struct{}{}}
 	m.recoveryBlocked = map[string]OperationEntry{}
-	if unfinished, err := UnfinishedOperations(root); err != nil {
+	if findings, err := InspectRecovery(root); err != nil {
 		m.recoveryReadErr = err
 	} else {
-		for _, operation := range unfinished {
+		for _, finding := range findings {
+			operation := finding.Operation
 			path := operation.RelatedPath
-			if path == "" && (operation.Action == "delete_original" || operation.Action == "record_ownership" || operation.Action == "restore_file" || operation.Action == "restore_ownership") {
+			if path == "" && (operation.Action == "delete_original" || operation.Action == "record_ownership" || operation.Action == "restore_file" || operation.Action == "restore_ownership" || operation.Action == "case_commit") {
 				path = operation.Target
 			}
 			if path != "" {
@@ -308,7 +310,7 @@ func (m *Manager) handle(hit HitEvent) {
 		if err := runJournaled(m.root, OperationEntry{
 			CaseID: c.ID, ArtifactID: ArtifactID(a.Path, a.FileID, a.SHA256), Action: "record_ownership", Target: a.Path,
 			Precondition: "quarantine verified at " + path, ExpectedHash: a.SHA256, ExpectedFileID: a.FileID, QuarantinePath: path,
-		}, func() error {
+		}, m.OnOperation, func() error {
 			return m.recordQuarantine(c.ID, a)
 		}); err != nil {
 			a.Status = "pending"
@@ -329,7 +331,7 @@ func (m *Manager) handle(hit HitEvent) {
 		if err := runJournaled(m.root, OperationEntry{
 			CaseID: c.ID, PersistenceID: PersistenceID(item.Type, item.Location, item.Name),
 			Action: "remove_persistence", Target: item.Name, RelatedPath: item.Target, Precondition: precondition,
-		}, func() error {
+		}, m.OnOperation, func() error {
 			return removePersistence(item)
 		}); err != nil {
 			c.Persistence[i].Status = "failed"

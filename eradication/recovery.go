@@ -3,10 +3,12 @@
 package eradication
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // RecoveryFinding is a read-only interpretation of an operation whose result
@@ -33,6 +35,105 @@ func InspectRecovery(root string) ([]RecoveryFinding, error) {
 			finding.Disposition, finding.Evidence = inspectOwnershipOperation(root, operation)
 		}
 		findings = append(findings, finding)
+	}
+	caseFindings, err := inspectCaseCommitGaps(root, findings)
+	if err != nil {
+		return nil, err
+	}
+	findings = append(findings, caseFindings...)
+	return findings, nil
+}
+
+func inspectCaseCommitGaps(root string, existing []RecoveryFinding) ([]RecoveryFinding, error) {
+	casesDir := filepath.Join(root, "eradication", "cases")
+	entries, err := os.ReadDir(casesDir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	seen := map[string]bool{}
+	for _, finding := range existing {
+		seen[finding.Operation.CaseID+"\x00"+strings.ToLower(filepath.Clean(finding.Operation.Target))] = true
+	}
+	findings := []RecoveryFinding{}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), "-plan.json") {
+			continue
+		}
+		id := strings.TrimSuffix(entry.Name(), "-plan.json")
+		if _, err := os.Stat(filepath.Join(casesDir, id+".json")); err == nil {
+			continue
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return nil, err
+		}
+		b, err := os.ReadFile(filepath.Join(casesDir, entry.Name()))
+		if err != nil {
+			return nil, err
+		}
+		var plan Case
+		if err := json.Unmarshal(b, &plan); err != nil || plan.ID != id {
+			return nil, fmt.Errorf("invalid recovery case plan %s: %v", id, err)
+		}
+		for _, artifact := range plan.Artifacts {
+			key := id + "\x00" + strings.ToLower(filepath.Clean(artifact.Path))
+			if artifact.Path == "" || seen[key] {
+				continue
+			}
+			seen[key] = true
+			findings = append(findings, RecoveryFinding{
+				Operation:   OperationEntry{CaseID: id, Action: "case_commit", Target: artifact.Path, ArtifactID: ArtifactID(artifact.Path, artifact.FileID, artifact.SHA256)},
+				Disposition: "manual_review", Evidence: "case plan exists but final case is missing; reconcile artifact and journal before further remediation",
+			})
+		}
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") || strings.HasSuffix(entry.Name(), "-plan.json") {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(casesDir, entry.Name()))
+		if err != nil {
+			return nil, err
+		}
+		var c Case
+		if err := json.Unmarshal(b, &c); err != nil || c.ID+".json" != entry.Name() {
+			return nil, fmt.Errorf("invalid recovery case %s: %v", entry.Name(), err)
+		}
+		if c.Status == "restored" || c.Status == "released" {
+			continue
+		}
+		journalDir := filepath.Join(root, "eradication", "journal", c.ID)
+		operations, err := os.ReadDir(journalDir)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		for _, file := range operations {
+			if file.IsDir() || !strings.HasSuffix(file.Name(), "-committed.json") {
+				continue
+			}
+			b, err := os.ReadFile(filepath.Join(journalDir, file.Name()))
+			if err != nil {
+				return nil, err
+			}
+			var operation OperationEntry
+			if err := json.Unmarshal(b, &operation); err != nil {
+				return nil, err
+			}
+			if operation.Action != "restore_file" || operation.CaseID != c.ID {
+				continue
+			}
+			for _, artifact := range c.Artifacts {
+				key := c.ID + "\x00" + strings.ToLower(filepath.Clean(operation.Target))
+				if samePath(artifact.Path, operation.Target) && artifact.Status != "restored" && !seen[key] {
+					seen[key] = true
+					findings = append(findings, RecoveryFinding{Operation: operation, Disposition: "manual_review", Evidence: "restore_file committed but case artifact state was not committed"})
+				}
+			}
+		}
 	}
 	return findings, nil
 }

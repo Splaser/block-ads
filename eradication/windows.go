@@ -380,7 +380,7 @@ func (m *Manager) quarantine(caseID string, hit HitEvent, a Artifact) (string, e
 	if err := runJournaled(m.root, OperationEntry{
 		CaseID: caseID, ArtifactID: ArtifactID(a.Path, a.FileID, a.SHA256), Action: "delete_original", Target: a.Path,
 		Precondition: precondition, ExpectedHash: a.SHA256, ExpectedFileID: a.FileID, QuarantinePath: target,
-	}, func() error {
+	}, m.OnOperation, func() error {
 		if err := os.Remove(a.Path); err != nil {
 			return err
 		}

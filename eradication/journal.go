@@ -33,6 +33,11 @@ type OperationEntry struct {
 	At             time.Time `json:"at"`
 }
 
+// OperationObserver receives a durable intent, a finished external action,
+// and a durable result in order. It is useful for progress reporting and
+// controlled crash testing. It must not mutate the entry.
+type OperationObserver func(OperationEntry, string)
+
 func journalPath(root string, entry OperationEntry) string {
 	return filepath.Join(root, "eradication", "journal", entry.CaseID, entry.ID+"-"+entry.Phase+".json")
 }
@@ -55,14 +60,20 @@ func writeOperation(root string, entry OperationEntry) error {
 	return atomicWrite(path, b)
 }
 
-func runJournaled(root string, entry OperationEntry, perform func() error) error {
+func runJournaled(root string, entry OperationEntry, observer OperationObserver, perform func() error) error {
 	entry.ID = newCaseID(HitEvent{})
 	entry.Phase = "intent"
 	entry.At = time.Now()
 	if err := writeOperation(root, entry); err != nil {
 		return fmt.Errorf("write %s intent: %w", entry.Action, err)
 	}
+	if observer != nil {
+		observer(entry, "after_intent")
+	}
 	actionErr := perform()
+	if observer != nil {
+		observer(entry, "after_action")
+	}
 	entry.At = time.Now()
 	if actionErr == nil {
 		entry.Phase = "committed"
@@ -72,6 +83,9 @@ func runJournaled(root string, entry OperationEntry, perform func() error) error
 	}
 	if err := writeOperation(root, entry); err != nil {
 		return errors.Join(actionErr, fmt.Errorf("write %s result: %w", entry.Action, err))
+	}
+	if observer != nil {
+		observer(entry, "after_result")
 	}
 	return actionErr
 }

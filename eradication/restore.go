@@ -22,6 +22,12 @@ import (
 // It never overwrites an existing target. Service backups require manual
 // review because SCM deletion can stay pending until reboot.
 func RestoreCase(root, id string) error {
+	return RestoreCaseWithObserver(root, id, nil)
+}
+
+// RestoreCaseWithObserver exposes durable action boundaries for progress
+// reporting and controlled crash testing.
+func RestoreCaseWithObserver(root, id string, observer OperationObserver) error {
 	if id == "" || filepath.Base(id) != id || strings.ContainsAny(id, `/\:`) {
 		return fmt.Errorf("invalid case ID")
 	}
@@ -69,7 +75,7 @@ func RestoreCase(root, id string) error {
 		if a.Status != "quarantined" {
 			continue
 		}
-		if err := restoreArtifact(root, id, *a); err != nil {
+		if err := restoreArtifact(root, id, *a, observer); err != nil {
 			failures = append(failures, fmt.Errorf("restore %s: %w", a.Path, err))
 			continue
 		}
@@ -82,7 +88,7 @@ func RestoreCase(root, id string) error {
 			if err := runJournaled(root, OperationEntry{
 				CaseID: id, ArtifactID: a.ID, Action: "restore_ownership", Target: a.Path,
 				Precondition: "file hash verified after restore", ExpectedHash: a.SHA256, ExpectedFileID: a.FileID, QuarantinePath: a.QuarantinePath,
-			}, func() error {
+			}, observer, func() error {
 				record.Status = "restored"
 				return writeArtifactRecord(root, record)
 			}); err != nil {
@@ -104,7 +110,7 @@ func RestoreCase(root, id string) error {
 			if err := runJournaled(root, OperationEntry{
 				CaseID: id, PersistenceID: PersistenceID(item.Type, item.Location, item.Name),
 				Action: "restore_persistence", Target: item.Name, RelatedPath: item.Target, Precondition: precondition,
-			}, func() error {
+			}, observer, func() error {
 				return restorePersistence(root, id, *item)
 			}); err != nil {
 				failures = append(failures, fmt.Errorf("restore %s %s: %w", item.Type, item.Name, err))
@@ -126,7 +132,7 @@ func RestoreCase(root, id string) error {
 	return errors.Join(failures...)
 }
 
-func restoreArtifact(root, caseID string, a Artifact) error {
+func restoreArtifact(root, caseID string, a Artifact, observer OperationObserver) error {
 	quarantineRoot := filepath.Join(root, "eradication", "quarantine")
 	if !beneath(a.QuarantinePath, quarantineRoot) || !inUserAppData(a.Path) {
 		return fmt.Errorf("restore path is outside allowed directories")
@@ -181,7 +187,7 @@ func restoreArtifact(root, caseID string, a Artifact) error {
 	return runJournaled(root, OperationEntry{
 		CaseID: caseID, ArtifactID: a.ID, Action: "restore_file", Target: a.Path,
 		Precondition: precondition, ExpectedHash: a.SHA256, ExpectedFileID: a.FileID, QuarantinePath: a.QuarantinePath,
-	}, func() error {
+	}, observer, func() error {
 		if err := windows.MoveFileEx(source, target, windows.MOVEFILE_WRITE_THROUGH); err != nil {
 			return err
 		}
