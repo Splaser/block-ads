@@ -79,7 +79,10 @@ func RestoreCase(root, id string) error {
 				failures = append(failures, err)
 				continue
 			}
-			if err := runJournaled(root, id, a.ID, "", "restore_ownership", a.Path, "file hash verified after restore", func() error {
+			if err := runJournaled(root, OperationEntry{
+				CaseID: id, ArtifactID: a.ID, Action: "restore_ownership", Target: a.Path,
+				Precondition: "file hash verified after restore", ExpectedHash: a.SHA256, ExpectedFileID: a.FileID, QuarantinePath: a.QuarantinePath,
+			}, func() error {
 				record.Status = "restored"
 				return writeArtifactRecord(root, record)
 			}); err != nil {
@@ -98,7 +101,10 @@ func RestoreCase(root, id string) error {
 				continue
 			}
 			precondition := fmt.Sprintf("type=%s location=%s backup=%s", item.Type, item.Location, item.BackupPath)
-			if err := runJournaled(root, id, "", PersistenceID(item.Type, item.Location, item.Name), "restore_persistence", item.Name, precondition, func() error {
+			if err := runJournaled(root, OperationEntry{
+				CaseID: id, PersistenceID: PersistenceID(item.Type, item.Location, item.Name),
+				Action: "restore_persistence", Target: item.Name, RelatedPath: item.Target, Precondition: precondition,
+			}, func() error {
 				return restorePersistence(root, id, *item)
 			}); err != nil {
 				failures = append(failures, fmt.Errorf("restore %s %s: %w", item.Type, item.Name, err))
@@ -172,7 +178,10 @@ func restoreArtifact(root, caseID string, a Artifact) error {
 	// Keep the no-overwrite guarantee even if another process creates the
 	// original path after the Lstat check above.
 	precondition := fmt.Sprintf("sha256=%s quarantine=%s target_absent=true", a.SHA256, a.QuarantinePath)
-	return runJournaled(root, caseID, a.ID, "", "restore_file", a.Path, precondition, func() error {
+	return runJournaled(root, OperationEntry{
+		CaseID: caseID, ArtifactID: a.ID, Action: "restore_file", Target: a.Path,
+		Precondition: precondition, ExpectedHash: a.SHA256, ExpectedFileID: a.FileID, QuarantinePath: a.QuarantinePath,
+	}, func() error {
 		if err := windows.MoveFileEx(source, target, windows.MOVEFILE_WRITE_THROUGH); err != nil {
 			return err
 		}

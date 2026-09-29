@@ -377,7 +377,10 @@ func (m *Manager) quarantine(caseID string, hit HitEvent, a Artifact) (string, e
 		return "", fmt.Errorf("source hash changed before removal: %v", err)
 	}
 	precondition := fmt.Sprintf("file_id=%s sha256=%s quarantine=%s", a.FileID, a.SHA256, target)
-	if err := runJournaled(m.root, caseID, ArtifactID(a.Path, a.FileID, a.SHA256), "", "delete_original", a.Path, precondition, func() error {
+	if err := runJournaled(m.root, OperationEntry{
+		CaseID: caseID, ArtifactID: ArtifactID(a.Path, a.FileID, a.SHA256), Action: "delete_original", Target: a.Path,
+		Precondition: precondition, ExpectedHash: a.SHA256, ExpectedFileID: a.FileID, QuarantinePath: target,
+	}, func() error {
 		if err := os.Remove(a.Path); err != nil {
 			return err
 		}

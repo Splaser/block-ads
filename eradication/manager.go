@@ -10,6 +10,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -85,16 +86,18 @@ type Case struct {
 }
 
 type Manager struct {
-	root          string
-	remediateMu   sync.Mutex
-	queueMu       sync.Mutex
-	queueReady    *sync.Cond
-	pending       []HitEvent
-	seenEvents    map[string]struct{}
-	closed        bool
-	workers       sync.WaitGroup
-	closeOnce     sync.Once
-	OnContainment func(HitEvent, bool, error)
+	root            string
+	remediateMu     sync.Mutex
+	queueMu         sync.Mutex
+	queueReady      *sync.Cond
+	pending         []HitEvent
+	seenEvents      map[string]struct{}
+	closed          bool
+	workers         sync.WaitGroup
+	closeOnce       sync.Once
+	OnContainment   func(HitEvent, bool, error)
+	recoveryBlocked map[string]OperationEntry
+	recoveryReadErr error
 }
 
 func NewManager(root string, queueSize, workerCount int) *Manager {
@@ -105,6 +108,20 @@ func NewManager(root string, queueSize, workerCount int) *Manager {
 		workerCount = 2
 	}
 	m := &Manager{root: root, pending: make([]HitEvent, 0, queueSize), seenEvents: map[string]struct{}{}}
+	m.recoveryBlocked = map[string]OperationEntry{}
+	if unfinished, err := UnfinishedOperations(root); err != nil {
+		m.recoveryReadErr = err
+	} else {
+		for _, operation := range unfinished {
+			path := operation.RelatedPath
+			if path == "" && (operation.Action == "delete_original" || operation.Action == "record_ownership" || operation.Action == "restore_file" || operation.Action == "restore_ownership") {
+				path = operation.Target
+			}
+			if path != "" {
+				m.recoveryBlocked[strings.ToLower(filepath.Clean(path))] = operation
+			}
+		}
+	}
 	m.queueReady = sync.NewCond(&m.queueMu)
 	for i := 0; i < workerCount; i++ {
 		m.workers.Add(1)
@@ -193,6 +210,14 @@ func (m *Manager) handle(hit HitEvent) {
 			log.Printf("[ERADICATION] case %s save failed: %v", c.ID, err)
 		}
 	}()
+	if m.recoveryReadErr != nil {
+		c.Errors = append(c.Errors, "recovery journal unreadable: "+m.recoveryReadErr.Error())
+		return
+	}
+	if operation, blocked := m.recoveryBlocked[strings.ToLower(filepath.Clean(hit.Image))]; blocked {
+		c.Errors = append(c.Errors, fmt.Sprintf("prior operation %s in case %s requires recovery review", operation.Action, operation.CaseID))
+		return
+	}
 
 	// A module snapshot must be attempted before termination. Newly created
 	// processes may not have an initialized loader table; absence is not proof.
@@ -280,7 +305,10 @@ func (m *Manager) handle(hit HitEvent) {
 		}
 		a.QuarantinePath = path
 		a.Status = "quarantined"
-		if err := runJournaled(m.root, c.ID, ArtifactID(a.Path, a.FileID, a.SHA256), "", "record_ownership", a.Path, "quarantine verified at "+path, func() error {
+		if err := runJournaled(m.root, OperationEntry{
+			CaseID: c.ID, ArtifactID: ArtifactID(a.Path, a.FileID, a.SHA256), Action: "record_ownership", Target: a.Path,
+			Precondition: "quarantine verified at " + path, ExpectedHash: a.SHA256, ExpectedFileID: a.FileID, QuarantinePath: path,
+		}, func() error {
 			return m.recordQuarantine(c.ID, a)
 		}); err != nil {
 			a.Status = "pending"
@@ -298,7 +326,10 @@ func (m *Manager) handle(hit HitEvent) {
 		}
 		item := &c.Persistence[i]
 		precondition := fmt.Sprintf("type=%s location=%s target=%s", item.Type, item.Location, item.Target)
-		if err := runJournaled(m.root, c.ID, "", PersistenceID(item.Type, item.Location, item.Name), "remove_persistence", item.Name, precondition, func() error {
+		if err := runJournaled(m.root, OperationEntry{
+			CaseID: c.ID, PersistenceID: PersistenceID(item.Type, item.Location, item.Name),
+			Action: "remove_persistence", Target: item.Name, RelatedPath: item.Target, Precondition: precondition,
+		}, func() error {
 			return removePersistence(item)
 		}); err != nil {
 			c.Persistence[i].Status = "failed"

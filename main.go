@@ -794,11 +794,12 @@ func run() error {
 	blkData = bl
 	blkLast = time.Now()
 	blkMu.Unlock()
-	if unfinished, err := eradication.UnfinishedOperations(appDir); err != nil {
+	if findings, err := eradication.InspectRecovery(appDir); err != nil {
 		log.Printf("[ERADICATION] 操作日志检查失败: %v", err)
 	} else {
-		for _, operation := range unfinished {
-			log.Printf("[ERADICATION] 未完成操作需核对外部状态: case=%s action=%s target=%s", operation.CaseID, operation.Action, operation.Target)
+		for _, finding := range findings {
+			operation := finding.Operation
+			log.Printf("[ERADICATION] 未完成操作需核对: case=%s action=%s target=%s state=%s evidence=%s", operation.CaseID, operation.Action, operation.Target, finding.Disposition, finding.Evidence)
 		}
 	}
 	eradicator = eradication.NewManager(appDir, 256, 2)

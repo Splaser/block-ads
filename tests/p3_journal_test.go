@@ -76,6 +76,11 @@ func TestOperationJournalForQuarantineAndRestore(t *testing.T) {
 		if !ok || intent.Precondition == "" || phases["committed"].Action != intent.Action {
 			t.Fatalf("operation lacks a matching intent and commit: %+v", phases)
 		}
+		if intent.Action == "delete_original" || intent.Action == "restore_file" {
+			if intent.ExpectedHash == "" || intent.ExpectedFileID == "" || intent.QuarantinePath == "" {
+				t.Fatalf("file operation lacks recovery identity: %+v", intent)
+			}
+		}
 		actions[intent.Action] = true
 	}
 	for _, action := range []string{"delete_original", "record_ownership", "restore_file", "restore_ownership"} {
