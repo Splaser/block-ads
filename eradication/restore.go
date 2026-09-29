@@ -127,6 +127,7 @@ func RestoreCaseWithObserver(root, id string, observer OperationObserver) error 
 }
 
 func restoreArtifact(root, caseID string, a Artifact, observer OperationObserver) error {
+	artifactID := ArtifactID(a.Path, a.FileID, a.SHA256)
 	quarantineRoot := filepath.Join(root, "eradication", "quarantine")
 	if !beneath(a.QuarantinePath, quarantineRoot) || !inUserAppData(a.Path) {
 		return fmt.Errorf("restore path is outside allowed directories")
@@ -142,30 +143,48 @@ func restoreArtifact(root, caseID string, a Artifact, observer OperationObserver
 	if err := os.MkdirAll(filepath.Dir(a.Path), 0700); err != nil {
 		return err
 	}
-	src, err := os.Open(a.QuarantinePath)
-	if err != nil {
-		return err
-	}
-	defer src.Close()
-	tmp, err := os.CreateTemp(filepath.Dir(a.Path), ".restore-*")
-	if err != nil {
-		return err
-	}
-	tmpPath := tmp.Name()
+	tmpPath := filepath.Join(filepath.Dir(a.Path), ".restore-"+newCaseID(HitEvent{}))
 	defer os.Remove(tmpPath)
-	if _, err := io.Copy(tmp, src); err != nil {
-		tmp.Close()
+	copyIntent := OperationEntry{
+		CaseID: caseID, ArtifactID: artifactID, Action: "restore_copy", Target: a.Path, RelatedPath: a.Path,
+		ExpectedHash: a.SHA256, ExpectedFileID: a.FileID, QuarantinePath: a.QuarantinePath,
+		TemporaryPath: tmpPath, Precondition: "quarantine hash verified; temporary destination absent",
+	}
+	if err := runJournaled(root, copyIntent, observer, func() error {
+		tmp, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+		if err != nil {
+			return err
+		}
+		src, err := os.Open(a.QuarantinePath)
+		if err != nil {
+			tmp.Close()
+			return err
+		}
+		_, copyErr := io.Copy(tmp, src)
+		src.Close()
+		if copyErr != nil {
+			tmp.Close()
+			return copyErr
+		}
+		if err := tmp.Sync(); err != nil {
+			tmp.Close()
+			return err
+		}
+		return tmp.Close()
+	}); err != nil {
 		return err
 	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
+	if err := runJournaled(root, OperationEntry{
+		CaseID: caseID, ArtifactID: artifactID, Action: "restore_hash_verify", Target: a.Path, RelatedPath: a.Path,
+		ExpectedHash: a.SHA256, ExpectedFileID: a.FileID, QuarantinePath: a.QuarantinePath,
+		TemporaryPath: tmpPath, Precondition: "temporary restore copy closed and synced",
+	}, observer, func() error {
+		if hash, err := fileSHA256(tmpPath); err != nil || hash != a.SHA256 {
+			return fmt.Errorf("restored copy hash mismatch: %v", err)
+		}
+		return nil
+	}); err != nil {
 		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if hash, err := fileSHA256(tmpPath); err != nil || hash != a.SHA256 {
-		return fmt.Errorf("restored copy hash mismatch: %v", err)
 	}
 	source, err := windows.UTF16PtrFromString(tmpPath)
 	if err != nil {
@@ -179,8 +198,8 @@ func restoreArtifact(root, caseID string, a Artifact, observer OperationObserver
 	// original path after the Lstat check above.
 	precondition := fmt.Sprintf("sha256=%s quarantine=%s target_absent=true", a.SHA256, a.QuarantinePath)
 	return runJournaled(root, OperationEntry{
-		CaseID: caseID, ArtifactID: a.ID, Action: "restore_file", Target: a.Path,
-		Precondition: precondition, ExpectedHash: a.SHA256, ExpectedFileID: a.FileID, QuarantinePath: a.QuarantinePath,
+		CaseID: caseID, ArtifactID: artifactID, Action: "restore_file", Target: a.Path,
+		Precondition: precondition, ExpectedHash: a.SHA256, ExpectedFileID: a.FileID, QuarantinePath: a.QuarantinePath, TemporaryPath: tmpPath,
 	}, observer, func() error {
 		if err := windows.MoveFileEx(source, target, windows.MOVEFILE_WRITE_THROUGH); err != nil {
 			return err

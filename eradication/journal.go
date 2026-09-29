@@ -31,6 +31,7 @@ type OperationEntry struct {
 	PreviousHash        string    `json:"previous_sha256,omitempty"`
 	ExpectedFileID      string    `json:"expected_file_id,omitempty"`
 	QuarantinePath      string    `json:"quarantine_path,omitempty"`
+	TemporaryPath       string    `json:"temporary_path,omitempty"`
 	RelatedPath         string    `json:"related_path,omitempty"`
 	Action              string    `json:"action"`
 	Target              string    `json:"target"`

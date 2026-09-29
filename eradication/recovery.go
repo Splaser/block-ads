@@ -35,6 +35,8 @@ func InspectRecovery(root string) ([]RecoveryFinding, error) {
 			finding.Disposition, finding.Evidence = inspectFileOperation(root, operation)
 		case "quarantine_copy", "quarantine_hash_verify", "quarantine_publish":
 			finding.Disposition, finding.Evidence = inspectQuarantinePreparation(root, operation)
+		case "restore_copy", "restore_hash_verify":
+			finding.Disposition, finding.Evidence = inspectRestorePreparation(root, operation)
 		case "record_ownership", "restore_ownership":
 			finding.Disposition, finding.Evidence = inspectOwnershipOperation(root, operation)
 		case "link_reference", "release_reference":
@@ -56,7 +58,106 @@ func InspectRecovery(root string) ([]RecoveryFinding, error) {
 		return nil, err
 	}
 	findings = append(findings, sharedFindings...)
+	copyFindings, err := inspectRestorePreparationGaps(root, findings)
+	if err != nil {
+		return nil, err
+	}
+	findings = append(findings, copyFindings...)
 	return findings, nil
+}
+
+func inspectRestorePreparationGaps(root string, existing []RecoveryFinding) ([]RecoveryFinding, error) {
+	dir := filepath.Join(root, "eradication", "journal")
+	blocked := map[string]bool{}
+	for _, finding := range existing {
+		if finding.Operation.TemporaryPath != "" {
+			blocked[finding.Operation.CaseID+"\x00"+finding.Operation.TemporaryPath] = true
+		}
+	}
+	preparations := map[string]OperationEntry{}
+	err := filepath.WalkDir(dir, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			return nil
+		}
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		var operation OperationEntry
+		if err := json.Unmarshal(b, &operation); err != nil {
+			return err
+		}
+		if operation.TemporaryPath == "" {
+			return nil
+		}
+		key := operation.CaseID + "\x00" + operation.TemporaryPath
+		if operation.Action == "restore_file" {
+			blocked[key] = true
+		}
+		if operation.Phase == "committed" && (operation.Action == "restore_copy" || operation.Action == "restore_hash_verify") {
+			if current, ok := preparations[key]; !ok || operation.At.After(current.At) {
+				preparations[key] = operation
+			}
+		}
+		return nil
+	})
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	findings := []RecoveryFinding{}
+	for key, operation := range preparations {
+		if blocked[key] {
+			continue
+		}
+		if _, err := os.Lstat(operation.TemporaryPath); errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		disposition, evidence := inspectRestorePreparation(root, operation)
+		if disposition == "observed_uncommitted" || disposition == "manual_review" {
+			disposition = "manual_review"
+			evidence = "restore preparation committed but publish was not started; temporary copy needs review"
+		}
+		findings = append(findings, RecoveryFinding{Operation: operation, Disposition: disposition, Evidence: evidence})
+	}
+	return findings, nil
+}
+
+func inspectRestorePreparation(root string, operation OperationEntry) (string, string) {
+	if operation.ExpectedHash == "" || operation.ExpectedFileID == "" || operation.TemporaryPath == "" ||
+		operation.ArtifactID != ArtifactID(operation.Target, operation.ExpectedFileID, operation.ExpectedHash) {
+		return "manual_review", "restore preparation intent lacks a complete artifact identity"
+	}
+	if !inUserAppData(operation.Target) || !samePath(filepath.Dir(operation.TemporaryPath), filepath.Dir(operation.Target)) ||
+		!strings.HasPrefix(strings.ToLower(filepath.Base(operation.TemporaryPath)), ".restore-") ||
+		!beneath(operation.QuarantinePath, filepath.Join(root, "eradication", "quarantine")) {
+		return "conflict", "restore preparation paths are outside allowed directories"
+	}
+	if hash, err := fileSHA256(operation.QuarantinePath); err != nil || hash != operation.ExpectedHash {
+		return "conflict", fmt.Sprintf("quarantine source differs from restore intent: %v", err)
+	}
+	info, err := os.Lstat(operation.TemporaryPath)
+	if errors.Is(err, os.ErrNotExist) {
+		if operation.Action == "restore_hash_verify" {
+			return "conflict", "restore copy disappeared before hash verification was committed"
+		}
+		return "not_observed", "temporary restore copy is absent"
+	}
+	if err != nil || !info.Mode().IsRegular() {
+		return "conflict", fmt.Sprintf("temporary restore copy cannot be read: %v", err)
+	}
+	if hash, err := fileSHA256(operation.TemporaryPath); err != nil || hash != operation.ExpectedHash {
+		return "conflict", fmt.Sprintf("temporary restore copy differs from intent: %v", err)
+	}
+	if operation.Action == "restore_hash_verify" {
+		return "manual_review", "copy hash matches but verification result was not committed"
+	}
+	return "observed_uncommitted", "temporary restore copy matches intent but copy result was not committed"
 }
 
 func inspectSharedCommitGaps(root string, existing []RecoveryFinding) ([]RecoveryFinding, error) {

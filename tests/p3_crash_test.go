@@ -216,6 +216,61 @@ func TestCrashAtRestoreFileBoundaries(t *testing.T) {
 	}
 }
 
+func TestCrashAtRestorePreparationBoundaries(t *testing.T) {
+	for _, tc := range []struct {
+		action, stage, disposition string
+	}{
+		{"restore_copy", "after_intent", "not_observed"},
+		{"restore_copy", "after_action", "observed_uncommitted"},
+		{"restore_copy", "after_result", "manual_review"},
+		{"restore_hash_verify", "after_intent", "manual_review"},
+		{"restore_hash_verify", "after_action", "manual_review"},
+		{"restore_hash_verify", "after_result", "manual_review"},
+	} {
+		t.Run(tc.action+"/"+tc.stage, func(t *testing.T) {
+			root := testRoot(t)
+			appData := filepath.Join(root, "AppData", "Roaming")
+			t.Setenv("APPDATA", appData)
+			t.Setenv("USERPROFILE", root)
+			path := filepath.Join(appData, "Bad", "sample.exe")
+			if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte("controlled artifact"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			fileID, err := eradication.FileID(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			manager := eradication.NewManager(root, 1, 1)
+			manager.Submit(eradication.HitEvent{ID: "restore-prep-crash", PID: 0xfffffffe, CreatedLow: 1, Image: path, FileID: fileID, RuleKind: "folder", Rule: "Bad"})
+			manager.Close()
+			cases := readCases(t, root)
+			if len(cases) != 1 || cases[0].Artifacts[0].Status != "quarantined" {
+				t.Fatalf("quarantine precondition failed: %+v", cases)
+			}
+			runCrashChild(t, root, tc.action, tc.stage, cases[0].ID)
+			if _, err := os.Stat(path); !os.IsNotExist(err) {
+				t.Fatalf("restore preparation changed original path: %v", err)
+			}
+			findings, err := eradication.InspectRecovery(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			found := false
+			for _, finding := range findings {
+				if finding.Operation.Action == tc.action && finding.Disposition == tc.disposition && finding.Operation.TemporaryPath != "" {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("restore preparation crash misclassified: %+v", findings)
+			}
+		})
+	}
+}
+
 func TestCrashAfterResultBeforeCaseCommit(t *testing.T) {
 	t.Run("delete_original", func(t *testing.T) {
 		root := testRoot(t)
