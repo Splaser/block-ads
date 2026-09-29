@@ -61,6 +61,7 @@ func TestOperationJournalForQuarantineAndRestore(t *testing.T) {
 		t.Fatal(err)
 	}
 	byID := map[string]map[string]eradication.OperationEntry{}
+	sequences := map[uint64]string{}
 	for _, entry := range readOperations(t, root) {
 		if entry.CaseID != cases[0].ID || entry.Target != path {
 			t.Fatalf("journal entry lost case or target: %+v", entry)
@@ -69,11 +70,22 @@ func TestOperationJournalForQuarantineAndRestore(t *testing.T) {
 			byID[entry.ID] = map[string]eradication.OperationEntry{}
 		}
 		byID[entry.ID][entry.Phase] = entry
+		if entry.Phase == "intent" {
+			if entry.Sequence == 0 || sequences[entry.Sequence] != "" {
+				t.Fatalf("missing or duplicate case sequence: %+v", entry)
+			}
+			sequences[entry.Sequence] = entry.ID
+		}
+	}
+	for sequence := uint64(1); sequence <= uint64(len(sequences)); sequence++ {
+		if sequences[sequence] == "" {
+			t.Fatalf("missing case sequence %d: %+v", sequence, sequences)
+		}
 	}
 	actions := map[string]bool{}
 	for _, phases := range byID {
 		intent, ok := phases["intent"]
-		if !ok || intent.Precondition == "" || phases["committed"].Action != intent.Action {
+		if !ok || intent.Precondition == "" || phases["committed"].Action != intent.Action || phases["committed"].Sequence != intent.Sequence {
 			t.Fatalf("operation lacks a matching intent and commit: %+v", phases)
 		}
 		if intent.Action == "delete_original" || intent.Action == "restore_file" {
@@ -91,6 +103,47 @@ func TestOperationJournalForQuarantineAndRestore(t *testing.T) {
 	unfinished, err := eradication.UnfinishedOperations(root)
 	if err != nil || len(unfinished) != 0 {
 		t.Fatalf("committed operations reported unfinished: %+v, %v", unfinished, err)
+	}
+}
+
+func TestJournalSequenceCorruptionIsRejected(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		entries []eradication.OperationEntry
+	}{
+		{"gap", []eradication.OperationEntry{
+			{ID: "first", Sequence: 1, Phase: "intent"},
+			{ID: "third", Sequence: 3, Phase: "intent"},
+		}},
+		{"duplicate", []eradication.OperationEntry{
+			{ID: "first", Sequence: 1, Phase: "intent"},
+			{ID: "second", Sequence: 1, Phase: "intent"},
+		}},
+		{"result mismatch", []eradication.OperationEntry{
+			{ID: "first", Sequence: 1, Phase: "intent"},
+			{ID: "first", Sequence: 2, Phase: "committed"},
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := testRoot(t)
+			dir := filepath.Join(root, "eradication", "journal", "sequence-case")
+			if err := os.MkdirAll(dir, 0700); err != nil {
+				t.Fatal(err)
+			}
+			for _, entry := range tc.entries {
+				entry.CaseID, entry.Action, entry.Target = "sequence-case", "test_action", `C:\test.exe`
+				b, err := json.Marshal(entry)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, entry.ID+"-"+entry.Phase+".json"), b, 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := eradication.ValidateJournalOrder(root); err == nil {
+				t.Fatal("corrupt operation sequence was accepted")
+			}
+		})
 	}
 }
 

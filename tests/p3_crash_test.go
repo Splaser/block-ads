@@ -85,7 +85,7 @@ func incompleteAction(t *testing.T, root, action string) eradication.OperationEn
 			t.Fatalf("crashed action unexpectedly has result: %+v", entry)
 		}
 	}
-	if intent.ID == "" {
+	if intent.ID == "" || intent.Sequence == 0 {
 		t.Fatalf("missing durable %s intent", action)
 	}
 	return intent

@@ -33,14 +33,14 @@
 
 ## 3. Crash semantics / Action Journal
 
-当前进度：`quarantine_copy`、`quarantine_hash_verify`、`quarantine_publish`、`delete_original`、`record_ownership`、`remove_persistence`、`restore_copy`、`restore_hash_verify`、`restore_file`、`restore_ownership`、`restore_persistence`、共享引用增减和最终 case 提交均已按 intent 与独立结果文件记录操作 ID、关联身份、前置条件、结果、错误和时间。隔离副本和恢复文件均使用不可覆盖的移动。文件操作的 intent 另存预期哈希、文件 identity、隔离路径和临时路径；Run/Task/Startup 的删除 intent 记录精确位置，文件型持久化项还记录备份哈希；case 更新记录新旧快照哈希。启动时只读核对未决操作、缺少最终 case 的 plan、孤立共享引用、已提交但未发布的恢复副本，以及已提交恢复动作与旧 case 状态的冲突；同一路径的新命中保留 case，暂停新的自动处置。被占用文件现在使用 Restart Manager 枚举占用者，仅在进程创建时间、镜像路径和文件 identity 均匹配原命中 EXE 时终止该进程，再重试删除；仍被占用则登记重启删除并保持 `pending_reboot`。子进程测试已覆盖隔离和恢复副本复制、哈希校验、发布、原件删除、Run/Task/Startup 删除、共享引用增减和最终 case 提交的三个崩溃边界；Run/Task 的真实删除边界测试已在 Windows workflow 上通过。当前不自动重试或回滚未决 journal。
+当前进度：`quarantine_copy`、`quarantine_hash_verify`、`quarantine_publish`、`delete_original`、`record_ownership`、`remove_persistence`、`restore_copy`、`restore_hash_verify`、`restore_file`、`restore_ownership`、`restore_persistence`、共享引用增减和最终 case 提交均已按 intent 与独立结果文件记录操作 ID、关联身份、前置条件、结果、错误和时间。新日志在同一 case 内还有持久化顺序号；跨进程写入使用 Windows 文件锁分配，读取时拒绝缺号、重复号或 intent/结果不一致。隔离副本和恢复文件均使用不可覆盖的移动。文件操作的 intent 另存预期哈希、文件 identity、隔离路径和临时路径；Run/Task/Startup 的删除 intent 记录精确位置，文件型持久化项还记录备份哈希；case 更新记录新旧快照哈希。启动时只读核对未决操作、缺少最终 case 的 plan、孤立共享引用、已提交但未发布的恢复副本，以及已提交恢复动作与旧 case 状态的冲突；同一路径的新命中保留 case，暂停新的自动处置。被占用文件现在使用 Restart Manager 枚举占用者，仅在进程创建时间、镜像路径和文件 identity 均匹配原命中 EXE 时终止该进程，再重试删除；仍被占用则登记重启删除并保持 `pending_reboot`。子进程测试已覆盖隔离和恢复副本复制、哈希校验、发布、原件删除、Run/Task/Startup 删除、共享引用增减和最终 case 提交的三个崩溃边界；Run/Task 的真实删除边界测试已在 Windows workflow 上通过。当前不自动重试或回滚未决 journal。
 
 - [ ] 为每个 destructive step 定义 `落盘 intent → 执行动作 → 验证结果 → 落盘 committed state`；已覆盖隔离与恢复副本的复制、哈希、发布、原件删除、持久化删除、共享引用和 case 提交；持久化恢复与跳过动作还需更完整的验证记录。文件内容在发布前同步，JSON 用临时文件与原子替换写入。
-- [ ] 持久化按序操作日志，记录操作 ID、case/artifact 引用、动作、前置条件、结果、错误和时间。关键动作已记录，仍需覆盖跳过动作，并给 case 内操作增加严格顺序号。
+- [ ] 持久化按序操作日志，记录操作 ID、case/artifact 引用、动作、前置条件、结果、错误和时间。关键动作与严格顺序号已记录，仍需覆盖跳过动作。
 - [x] 在复制、哈希校验、删除原件、清除持久化项、写入 committed state 之前和之后分别注入崩溃。文件、Run/Task/Startup、共享引用和最终 case 提交均覆盖三个日志边界。
 - [ ] 启动时从 intent、journal、case、备份与隔离副本重建进度；目前已只读核对文件、归属记录、缺失的最终 case 与滞后的恢复状态，暂停同路径新的自动处置，仍需关联持久化备份，再决定安全继续、回滚或人工处理。
 - [x] 被占用文件先识别并终止身份匹配的占用进程，再重试删除；仍被占用时可登记 reboot-delete，单独记录 `pending_reboot`，重启后验证前不能记为已删除。登记失败仍为 `pending`，待重启 case 暂不允许恢复。
-- [ ] 在重启后核对排队删除是否真正执行；恢复前安全取消尚未执行的排队删除，并防止路径被替换后误删。
+- [ ] 在重启后核对排队删除是否真正执行；恢复前安全取消尚未执行的排队删除，并防止路径被替换后误删。（按当前优先级暂缓。）
 
 ## 4. Task / Service 失败与恢复
 
